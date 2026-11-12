@@ -38,3 +38,13 @@ iosApp/Configuration/DeviceSigning.local.json
 
 # Local MPVKit iOS build environment (sparse APFS image, see MPVKit docs)
 .mpvkit-build.sparseimage
+
+# Local editor / assistant settings
+.vscode/
+.claude/
+
+# Local Windows desktop toolchain output (WebView2 SDK fetched with
+# `nuget install ... -OutputDirectory .nuget`, Gradle heap dumps, build logs)
+.nuget/
+*.hprof
+*.log
