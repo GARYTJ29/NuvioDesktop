@@ -2,6 +2,7 @@ package com.nuvio.app.features.player.desktop
 
 import androidx.compose.ui.graphics.Color
 import co.touchlab.kermit.Logger
+import com.nuvio.app.features.power.PowerMenu
 import com.nuvio.app.features.player.PlayerControlAddonSubtitleItem
 import com.nuvio.app.features.player.PlayerControlEpisodeItem
 import com.nuvio.app.features.player.PlayerControlFilterItem
@@ -34,6 +35,7 @@ import com.nuvio.app.features.player.inferForcedSubtitleTrack
 import com.nuvio.app.features.player.toStorageHexString
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.awt.Component
 import java.awt.event.WindowAdapter
@@ -74,6 +76,9 @@ internal class NativePlayerController(
 
         /** Cap on waiting for the previous player's teardown so a hung one cannot block playback. */
         const val TEARDOWN_WAIT_MS = 5_000L
+
+        /** Overlay events that are not someone using it. */
+        val PassiveControlEvents = setOf("controlsReady", "parentalGuideComplete", "hideChrome", "fetchAddonSubtitles")
 
         @Volatile
         var rememberedVolumeLevel: Float = DesktopPlayerVolumeStorage.loadVolumeLevel() ?: 1f
@@ -505,6 +510,19 @@ internal class NativePlayerController(
         }
     }
 
+    /** Whether playback is paused, or null while there is no player to ask. */
+    val isPlaybackPaused: Boolean?
+        get() = handle.takeIf { it != 0L }?.let { current ->
+            runCatching { NativePlayerBridge.isPaused(current) }.getOrNull()
+        }
+
+    /** Shows a toast inside the player overlay, which covers the app's own toasts. */
+    fun showOverlayToast(message: String) {
+        runControlsScript(
+            "typeof showPlayerToast==='function'&&showPlayerToast(${Json.encodeToString(String.serializer(), message)})",
+        )
+    }
+
     /** Runs [script] in the controls page. Windows only; a no-op until the player exists. */
     fun runControlsScript(script: String) {
         if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return
@@ -559,7 +577,11 @@ internal class NativePlayerController(
         if (type.shouldLogNativeControlEvent()) {
             log.d { "event received handle=$handle type=$type value=$value" }
         }
+        // Mouse and keys over the player go to the WebView, not to AWT, so the
+        // overlay's own events are how the idle check hears about them.
+        if (type !in PassiveControlEvents) ActiveDesktopPlayer.onUserActivity?.invoke()
         when (type) {
+            "powerMenu" -> PowerMenu.toggle()
             "cursorActivity" -> host.noteCursorActivity()
             "scrubChange" -> {
                 val handled = onScrubChange(value.toLong())

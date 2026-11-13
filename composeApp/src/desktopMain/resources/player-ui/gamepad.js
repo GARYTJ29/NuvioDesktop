@@ -228,7 +228,7 @@
   };
 
   // --- bindings --------------------------------------------------------------
-  const press = (name, { lb = false, rb = false } = {}) => {
+  const press = (name, { rb = false } = {}) => {
     held.add(name);
     document.documentElement.classList.add("gamepad-active");
     if (scrub && !(name in SEEK_BUTTONS)) scrubCommit();
@@ -334,4 +334,13 @@
   };
 
   window.nuvioGamepad = { press, release, setActive };
+
+  // Ctrl+Q opens the power menu (sleep timer). Keys in the player reach this
+  // page rather than the app window, so the shortcut is caught here too.
+  document.addEventListener("keydown", event => {
+    if (event.code !== "KeyQ" || !event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!event.repeat) send("powerMenu", 0);
+  }, true);
 })();

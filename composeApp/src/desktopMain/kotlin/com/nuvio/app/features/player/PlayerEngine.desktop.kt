@@ -34,6 +34,7 @@ import com.nuvio.app.features.gamepad.PlayerGamepadHandler
 import com.nuvio.app.core.ui.AppPresenceState
 import com.nuvio.app.core.ui.LocalNuvioPlatformDensity
 import com.nuvio.app.core.ui.PresenceSnapshot
+import com.nuvio.app.features.player.desktop.ActiveDesktopPlayer
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerPictureInPicture
 import com.nuvio.app.features.player.desktop.NativePlayerController
@@ -218,8 +219,10 @@ private fun NativePlayerSurface(
     DisposableEffect(controller) {
         val gamepadHandler = PlayerGamepadHandler(controller)
         GamepadRouter.playerHandler = gamepadHandler
+        ActiveDesktopPlayer.controller = controller
         onDispose {
             if (GamepadRouter.playerHandler === gamepadHandler) GamepadRouter.playerHandler = null
+            if (ActiveDesktopPlayer.controller === controller) ActiveDesktopPlayer.controller = null
         }
     }
     val gamepadConnected by GamepadRouter.connected.collectAsState()

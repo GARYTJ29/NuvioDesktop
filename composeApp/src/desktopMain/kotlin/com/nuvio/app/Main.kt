@@ -27,6 +27,7 @@ import com.nuvio.app.core.ui.ProvideDesktopWindowInsets
 import com.nuvio.app.features.discordrpc.DiscordPresenceManager
 import com.nuvio.app.features.gamepad.GamepadFocusHost
 import com.nuvio.app.features.p2p.P2pStreamingEngine
+import com.nuvio.app.features.power.PowerHost
 import com.nuvio.app.features.plugins.configureDesktopQuickJsLibrary
 import com.nuvio.app.features.player.PlatformPlayerSurface
 import com.nuvio.app.features.player.desktop.DesktopAppFullscreenController
@@ -223,6 +224,10 @@ fun main(args: Array<String>) {
                     unregisterFullscreenToggle()
                 }
             }
+
+            // Power menu (Ctrl+Q / LB+X), sleep timer and idle check; Quit goes
+            // through the same orderly exit as closing the window.
+            PowerHost(window, onQuit = closeApplication)
 
             if (smokePlayerUrl == null) {
                 Box(
