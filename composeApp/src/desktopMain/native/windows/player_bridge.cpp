@@ -1023,6 +1023,18 @@ public:
         });
     }
 
+    // Runs a script in the controls page, e.g. a gamepad press read natively.
+    // Dropped until the page is ready: a press made while it loads has nothing
+    // to act on yet.
+    void executeScript(const std::string &script) {
+        if (script.empty()) return;
+        std::wstring wideScript = toWide(script);
+        postUiTask([self = shared_from_this(), wideScript]() {
+            if (self->shuttingDown.load() || !self->webView || !self->controlsWebReady.load()) return;
+            self->webView->ExecuteScript(wideScript.c_str(), nullptr);
+        });
+    }
+
     void beginWindowDrag() {
         if (!containerHwnd) return;
         HWND rootWindow = GetAncestor(containerHwnd, GA_ROOT);
@@ -2495,6 +2507,13 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_requestFocus(JNIEnv *, jobject, jlong handle) {
     auto player = playerFromHandle(handle);
     if (player) player->requestFocus();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_executeScript(JNIEnv *env, jobject, jlong handle, jstring script) {
+    auto player = playerFromHandle(handle);
+    std::string scriptText = jstringToUtf8(env, script);
+    if (player) player->executeScript(scriptText);
 }
 
 extern "C" JNIEXPORT void JNICALL

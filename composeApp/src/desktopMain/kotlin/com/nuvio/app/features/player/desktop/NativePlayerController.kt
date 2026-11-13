@@ -505,6 +505,14 @@ internal class NativePlayerController(
         }
     }
 
+    /** Runs [script] in the controls page. Windows only; a no-op until the player exists. */
+    fun runControlsScript(script: String) {
+        if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return
+        val current = handle.takeIf { it != 0L } ?: return
+        runCatching { NativePlayerBridge.executeScript(current, script) }
+            .onFailure { error -> log.w(error) { "controls script failed handle=$current" } }
+    }
+
     fun setNowPlayingMetadata(title: String?, subtitle: String?, artworkUrl: String?) {
         if (DesktopHostOs.current != DesktopHostOs.MACOS) return
         currentNowPlayingTitle = title.orEmpty()
@@ -577,6 +585,11 @@ internal class NativePlayerController(
                     onDesktopFullscreenChanged()
                 }
             }
+            // A held-direction gamepad scrub: playback is held paused while the
+            // frame follows the target, and the scrubFinish that ends it is the
+            // real seek (see player-ui/gamepad.js).
+            "gamepadPreviewSeek" -> handle.takeIf { it != 0L }?.let { nativeSeekTo(it, value.toLong()) }
+            "gamepadSetPaused" -> handle.takeIf { it != 0L }?.let { NativePlayerBridge.setPaused(it, value != 0.0) }
             "dragWindow" -> NativePlayerBridge.beginWindowDrag(handle)
             "volumeChange" -> setFallbackVolume(value.toFloat())
             "volumeChangeTemporary" -> setTemporaryVolume(value.toFloat())

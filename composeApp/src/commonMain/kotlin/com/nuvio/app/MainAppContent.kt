@@ -26,6 +26,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import com.nuvio.app.core.input.AppNavigationBridge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -435,6 +437,36 @@ internal fun MainAppContent(
             }
             AppScreenTab.Library -> libraryScrollToTopRequests.tryEmit(Unit)
             AppScreenTab.Settings -> settingsRootActionRequests.tryEmit(Unit)
+        }
+    }
+
+    // Tab and reload requests from input outside the Compose tree (the desktop
+    // gamepad). A tab request from a pushed screen returns to the tabs first.
+    SideEffect {
+        AppNavigationBridge.reportState(
+            tab = selectedTab,
+            onRootTabs = currentRoute == null || currentRoute is TabsRoute,
+            playerRouteActive = currentRoute is PlayerRoute,
+        )
+    }
+    val latestUseNativeNavigation by rememberUpdatedState(useNativeNavigation)
+    val latestActivateTab by rememberUpdatedState<(AppScreenTab) -> Unit>({ tab -> activateTab(tab) })
+    val latestEnabledAddons by rememberUpdatedState(addonsUiState.addons)
+    LaunchedEffect(navController) {
+        AppNavigationBridge.tabRequests.collect { tab ->
+            if (!latestUseNativeNavigation) {
+                while (navBackStack.size > 1 && navBackStack.lastOrNull() !is TabsRoute) {
+                    if (!navController.popBackStack()) break
+                }
+            }
+            latestActivateTab(tab)
+        }
+    }
+    LaunchedEffect(Unit) {
+        AppNavigationBridge.reloadRequests.collect {
+            val enabledAddons = latestEnabledAddons.enabledAddons()
+            HomeCatalogSettingsRepository.syncCatalogs(enabledAddons)
+            HomeRepository.refresh(enabledAddons)
         }
     }
 
