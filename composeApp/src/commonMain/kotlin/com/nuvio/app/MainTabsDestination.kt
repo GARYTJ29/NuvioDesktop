@@ -21,6 +21,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +37,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.max
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.focus.onFocusChanged
+import com.nuvio.app.core.input.AppNavigationBridge
 import com.nuvio.app.core.ui.LocalNuvioBottomNavigationOverlayPadding
 import com.nuvio.app.core.ui.LocalNuvioNavBarScrollState
 import com.nuvio.app.core.ui.NuvioNavBarScrollState
@@ -120,11 +123,17 @@ internal fun MainTabsDestination(
         val sidebarHoverSource = remember { MutableInteractionSource() }
         val isSidebarHovered by sidebarHoverSource.collectIsHoveredAsState()
         var isProfileStackVisible by remember { mutableStateOf(false) }
+        // With a controller, the sidebar opens while focus is in it and closes
+        // when focus moves out to the content, whatever the pointer rests on.
+        var sidebarHasFocus by remember { mutableStateOf(false) }
+        val directionalInputActive by AppNavigationBridge.isDirectionalInputActive.collectAsState()
 
         val isSidebarExpanded = when (navBarStyleSetting) {
             NavBarStyle.EXPANDED -> true
             NavBarStyle.COMPACT -> isProfileStackVisible
-            else -> isSidebarHovered || isProfileStackVisible // ADAPTIVE
+            // ADAPTIVE
+            else -> isProfileStackVisible ||
+                (if (directionalInputActive) sidebarHasFocus else isSidebarHovered)
         }
 
         val animatedSidebarWidth by animateDpAsState(
@@ -266,7 +275,9 @@ internal fun MainTabsDestination(
                         hoverSource = sidebarHoverSource,
                         profileStackVisible = isProfileStackVisible,
                         onProfileStackVisibleChange = { isProfileStackVisible = it },
-                        modifier = Modifier.align(Alignment.CenterStart),
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .onFocusChanged { sidebarHasFocus = it.hasFocus },
                     )
                 }
 

@@ -14,7 +14,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -329,7 +329,7 @@ internal fun TabletFloatingTopBar(
     val tokens = MaterialTheme.nuvio
     val statusBarPadding = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isHovered by interactionSource.collectIsPointerHoveredAsState()
     var isProfileSwitcherOpen by remember { mutableStateOf(false) }
 
     val isNarrowWindow = windowWidth != null && windowWidth < 800.dp

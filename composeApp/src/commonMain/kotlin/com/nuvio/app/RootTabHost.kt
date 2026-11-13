@@ -87,7 +87,11 @@ private fun RootTabPane(
             Box(
                 Modifier.fillMaxSize()
                     .graphicsLayer()
-                    .focusProperties { canFocus = active }
+                    // Only ever switch focus off. Properties set here override the
+                    // first focus target below, so `canFocus = true` would turn the
+                    // screen's top-level focus group (its LazyColumn) into a single
+                    // focusable item that d-pad/arrow navigation can't move into.
+                    .focusProperties { if (!active) canFocus = false }
                     .pointerInput(active) {
                         if (!active) {
                             awaitPointerEventScope {

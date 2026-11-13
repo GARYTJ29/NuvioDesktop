@@ -31,6 +31,36 @@ object AppNavigationBridge {
     private val playerRouteState = MutableStateFlow(false)
     val isPlayerRouteActive: StateFlow<Boolean> = playerRouteState.asStateFlow()
 
+    private val directionalInputState = MutableStateFlow(false)
+
+    /**
+     * True while a controller is driving the UI, from its last press until the
+     * mouse really moves. Hover-driven chrome (the desktop sidebar) ignores a
+     * parked pointer meanwhile and follows focus instead.
+     */
+    val isDirectionalInputActive: StateFlow<Boolean> = directionalInputState.asStateFlow()
+
+    fun reportDirectionalInput(active: Boolean) {
+        if (directionalInputState.value != active) directionalInputState.value = active
+    }
+
+    private var directionalHandler: DirectionalInputRegistration? = null
+
+    internal fun setDirectionalHandler(registration: DirectionalInputRegistration) {
+        directionalHandler = registration
+    }
+
+    internal fun clearDirectionalHandler(registration: DirectionalInputRegistration) {
+        if (directionalHandler === registration) directionalHandler = null
+    }
+
+    /**
+     * Offers a pad direction to the focused item that registered through
+     * [onDirectionalInput]; true when it used it.
+     */
+    fun dispatchDirectionalInput(direction: NavigationDirection): Boolean =
+        directionalHandler?.handle?.invoke(direction) ?: false
+
     fun requestTab(tab: AppScreenTab) {
         tabRequestFlow.tryEmit(tab)
     }

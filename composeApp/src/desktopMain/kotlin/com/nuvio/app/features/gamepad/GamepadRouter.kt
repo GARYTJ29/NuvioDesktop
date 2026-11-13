@@ -76,6 +76,7 @@ internal object GamepadRouter {
 
     fun onPress(press: GamepadPress) {
         activityListeners.forEach { it() }
+        AppNavigationBridge.reportDirectionalInput(true)
         for (overlay in overlays.reversed()) {
             if (overlay.onPress(press)) return
         }

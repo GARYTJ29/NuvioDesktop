@@ -36,15 +36,35 @@ import androidx.compose.ui.unit.dp
 import com.nuvio.app.AppScreenTab
 import com.nuvio.app.awtScale
 import com.nuvio.app.core.input.AppNavigationBridge
+import com.nuvio.app.core.input.NavigationDirection
 import com.nuvio.app.features.player.desktop.toggleDesktopAppFullscreen
 import com.nuvio.app.postPreciseWheel
+import java.awt.AWTEvent
 import java.awt.Point
+import java.awt.Toolkit
 import java.awt.Window
+import java.awt.event.AWTEventListener
+import java.awt.event.MouseEvent
 import javax.swing.SwingUtilities
 
 // The shell scrolled by three steps of 30px when the d-pad found nothing further
 // in its direction.
 private const val EdgeScrollPx = 90f
+
+// Stick ticks closer together than this belong to one scroll gesture. The
+// poller sends one every ~8ms while the stick is deflected.
+private const val ScrollGestureGapMs = 250L
+
+/**
+ * Where the wheel events of the current stick gesture go, in host pixels. It
+ * stays put for the whole gesture: the focused card moves with the content, and
+ * following it would walk the pointer off the row (or the window) and strand
+ * the scroll.
+ */
+private class ScrollAnchor {
+    var point: Offset? = null
+    var lastAt: Long = 0L
+}
 
 /**
  * Drives the app's own Compose focus from the pad, the way the shell's spatial
@@ -103,21 +123,35 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
         GamepadRouter.isKeyboardOpen = keyboardVisible
     }
 
+    val scrollAnchor = remember { ScrollAnchor() }
+
     fun scrollBy(dx: Float, dy: Float) {
         val component = window.focusOwner ?: (window as? javax.swing.RootPaneContainer)?.contentPane ?: return
-        val scale = component.awtScale
-        // Scroll whatever is under the focused item, or the middle of the window.
-        val center = latestFocusedBounds.value?.center
-        val local = if (center != null) {
-            // The host fills the window's content, so its pixels map straight
-            // onto the content component.
-            Point((center.x / scale).toInt(), (center.y / scale).toInt())
+        val scale = component.awtScale.toFloat()
+        // The host fills the window's content, so its pixels map straight onto
+        // the content component.
+        val visible = Rect(0f, 0f, component.width * scale, component.height * scale)
+        val now = System.currentTimeMillis()
+        val previous = scrollAnchor.point
+        val anchor = if (previous != null && now - scrollAnchor.lastAt < ScrollGestureGapMs) {
+            previous
         } else {
-            Point(component.width / 2, component.height / 2)
+            // A new gesture scrolls whatever is under the focused item, if that
+            // is still on screen; otherwise wherever the last gesture scrolled,
+            // or the middle of the window.
+            val center = latestFocusedBounds.value?.center
+            when {
+                center != null && visible.contains(center) -> center
+                previous != null && visible.contains(previous) -> previous
+                else -> visible.center
+            }
         }
+        scrollAnchor.point = anchor
+        scrollAnchor.lastAt = now
+        val local = Point((anchor.x / scale).toInt(), (anchor.y / scale).toInt())
         SwingUtilities.convertPointToScreen(local, component)
-        if (dx != 0f) postPreciseWheel(component, local, dx * scale, horizontal = true, modifiers = 0)
-        if (dy != 0f) postPreciseWheel(component, local, dy * scale, horizontal = false, modifiers = 0)
+        if (dx != 0f) postPreciseWheel(component, local, (dx * scale).toDouble(), horizontal = true, modifiers = 0)
+        if (dy != 0f) postPreciseWheel(component, local, (dy * scale).toDouble(), horizontal = false, modifiers = 0)
     }
 
     fun navigate(button: GamepadButton) {
@@ -136,6 +170,13 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
             return
         }
         if (latestHostHasFocus.value) {
+            val navigationDirection = when (button) {
+                GamepadButton.UP -> NavigationDirection.Up
+                GamepadButton.DOWN -> NavigationDirection.Down
+                GamepadButton.LEFT -> NavigationDirection.Left
+                else -> NavigationDirection.Right
+            }
+            if (AppNavigationBridge.dispatchDirectionalInput(navigationDirection)) return
             val moved = focusManager.moveFocus(direction)
             if (!moved) {
                 when (button) {
@@ -181,7 +222,21 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
         }
         GamepadRouter.browseHandler = handler
         GamepadPoller.start()
+        // Hand the UI back to the mouse once it really moves. Compare screen
+        // positions: Windows also reports a move when a window resizes or opens
+        // under a still pointer.
+        var lastPointer: Point? = null
+        val mouseListener = AWTEventListener { event ->
+            val mouse = event as? MouseEvent ?: return@AWTEventListener
+            if (mouse.id != MouseEvent.MOUSE_MOVED && mouse.id != MouseEvent.MOUSE_DRAGGED) return@AWTEventListener
+            val position = mouse.locationOnScreen
+            val previous = lastPointer
+            lastPointer = position
+            if (previous != null && previous != position) AppNavigationBridge.reportDirectionalInput(false)
+        }
+        Toolkit.getDefaultToolkit().addAWTEventListener(mouseListener, AWTEvent.MOUSE_MOTION_EVENT_MASK)
         onDispose {
+            Toolkit.getDefaultToolkit().removeAWTEventListener(mouseListener)
             if (GamepadRouter.browseHandler === handler) GamepadRouter.browseHandler = null
         }
     }

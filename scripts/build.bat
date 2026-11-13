@@ -45,6 +45,23 @@ if defined JAVA_HOME (
     )
 )
 
+REM --- Backend config (local-only, git-ignored) ----------------------------------
+REM Reads KEY=VALUE lines from scripts\nuvio.local.env (see nuvio.local.env.example)
+REM and exports them so Gradle bakes them into SupabaseConfig. Lines starting with
+REM # are comments. Without this file the build has no backend: no account sync,
+REM no Continue Watching from the cloud, no profile avatars.
+set "LOCAL_ENV=%ROOT%\scripts\nuvio.local.env"
+if exist "%LOCAL_ENV%" (
+    echo [build] Loading backend config from scripts\nuvio.local.env
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%LOCAL_ENV%") do (
+        if not "%%B"=="" set "%%A=%%B"
+    )
+)
+if not defined NUVIO_SUPABASE_URL (
+    echo [build] WARNING: NUVIO_SUPABASE_URL is not set. The build will have no backend.
+    echo [build]          Copy scripts\nuvio.local.env.example to scripts\nuvio.local.env and fill it in.
+)
+
 REM --- Gradle build -----------------------------------------------------------
 if "%DO_CLEAN%"=="1" (
     echo [build] Cleaning...

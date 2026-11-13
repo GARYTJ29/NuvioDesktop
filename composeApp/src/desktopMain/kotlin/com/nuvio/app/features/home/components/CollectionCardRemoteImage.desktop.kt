@@ -3,7 +3,7 @@ package com.nuvio.app.features.home.components
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -221,7 +221,7 @@ internal actual fun CollectionCardRemoteImage(
     animateIfPossible: Boolean,
 ) {
     val hoverInteractionSource = remember { MutableInteractionSource() }
-    val isHovered by hoverInteractionSource.collectIsHoveredAsState()
+    val isHovered by hoverInteractionSource.collectIsPointerHoveredAsState()
 
     val shouldAnimate = animateIfPossible && (isHovered || staticImageUrl.isNullOrBlank())
 

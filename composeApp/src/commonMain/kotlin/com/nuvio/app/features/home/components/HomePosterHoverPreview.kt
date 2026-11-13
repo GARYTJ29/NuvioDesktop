@@ -14,7 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -139,8 +139,8 @@ internal fun HomePosterHoverPreview(
 
     val anchorInteractionSource = remember { MutableInteractionSource() }
     val previewInteractionSource = remember { MutableInteractionSource() }
-    val anchorHovered by anchorInteractionSource.collectIsHoveredAsState()
-    val previewHovered by previewInteractionSource.collectIsHoveredAsState()
+    val anchorHovered by anchorInteractionSource.collectIsPointerHoveredAsState()
+    val previewHovered by previewInteractionSource.collectIsPointerHoveredAsState()
     var previewVisible by remember(item.type, item.id) { mutableStateOf(false) }
     var popupMounted by remember(item.type, item.id) { mutableStateOf(false) }
     var previewDismissedByScroll by remember(item.type, item.id) { mutableStateOf(false) }

@@ -68,7 +68,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -1250,7 +1250,7 @@ private fun DesktopStreamActionRow(
     onSelected: () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isHovered by interactionSource.collectIsPointerHoveredAsState()
     val rowShape = RoundedCornerShape(5.dp)
 
     Row(

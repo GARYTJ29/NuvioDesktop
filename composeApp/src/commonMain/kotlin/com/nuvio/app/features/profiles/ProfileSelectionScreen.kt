@@ -11,7 +11,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -387,7 +387,7 @@ private fun ProfileAvatarCard(
 
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isHovered by interactionSource.collectIsPointerHoveredAsState()
     val currentOnHoverChange = rememberUpdatedState(onHoverChange)
     val pressScale = if (isPressed) 0.95f else 1f
 

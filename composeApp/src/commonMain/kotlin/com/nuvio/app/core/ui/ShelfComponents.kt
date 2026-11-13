@@ -7,7 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -561,7 +561,7 @@ internal fun Modifier.desktopPosterHoverScale(
 ): Modifier {
     if (!enabled || !isDesktop) return this
 
-    val hovered by interactionSource.collectIsHoveredAsState()
+    val hovered by interactionSource.collectIsPointerHoveredAsState()
     val scale by animateFloatAsState(
         targetValue = if (hovered) DesktopPosterHoverScale else 1f,
         animationSpec = spring(

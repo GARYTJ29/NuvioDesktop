@@ -6,6 +6,19 @@ import java.awt.Toolkit
 import java.awt.event.KeyEvent
 
 /**
+ * A key event posted for the controller rather than typed on a keyboard, so
+ * keyboard-only shortcuts (Escape leaving fullscreen) can tell the two apart.
+ */
+internal class SyntheticKeyEvent(
+    source: Component,
+    id: Int,
+    `when`: Long,
+    modifiers: Int,
+    keyCode: Int,
+    keyChar: Char,
+) : KeyEvent(source, id, `when`, modifiers, keyCode, keyChar)
+
+/**
  * Synthetic key presses posted to whatever holds AWT focus, which is Compose's
  * canvas. Going through the event queue means they reach the focused layer
  * (a dialog included) exactly the way a real keyboard's would.
@@ -18,15 +31,15 @@ internal object AwtKeys {
         val component = target() ?: return
         val queue = Toolkit.getDefaultToolkit().systemEventQueue
         val now = System.currentTimeMillis()
-        queue.postEvent(KeyEvent(component, KeyEvent.KEY_PRESSED, now, modifiers, keyCode, keyChar))
-        queue.postEvent(KeyEvent(component, KeyEvent.KEY_RELEASED, now, modifiers, keyCode, keyChar))
+        queue.postEvent(SyntheticKeyEvent(component, KeyEvent.KEY_PRESSED, now, modifiers, keyCode, keyChar))
+        queue.postEvent(SyntheticKeyEvent(component, KeyEvent.KEY_RELEASED, now, modifiers, keyCode, keyChar))
     }
 
     /** One typed character, the event a text field inserts. */
     fun type(char: Char) {
         val component = target() ?: return
         Toolkit.getDefaultToolkit().systemEventQueue.postEvent(
-            KeyEvent(component, KeyEvent.KEY_TYPED, System.currentTimeMillis(), 0, KeyEvent.VK_UNDEFINED, char),
+            SyntheticKeyEvent(component, KeyEvent.KEY_TYPED, System.currentTimeMillis(), 0, KeyEvent.VK_UNDEFINED, char),
         )
     }
 

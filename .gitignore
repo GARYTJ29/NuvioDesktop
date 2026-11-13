@@ -51,4 +51,9 @@ iosApp/Configuration/DeviceSigning.local.json
 !scripts/build.bat
 !scripts/run.bat
 !scripts/README-build.md
+!scripts/nuvio.local.env.example
 dist/
+
+# Local backend config for scripts\build.bat (Supabase URL / anon key)
+scripts/nuvio.local.env
+*.local.env

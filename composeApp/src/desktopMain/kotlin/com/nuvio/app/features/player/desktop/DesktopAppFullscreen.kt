@@ -3,6 +3,8 @@ package com.nuvio.app.features.player.desktop
 import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.WindowState
+import com.nuvio.app.features.gamepad.SyntheticKeyEvent
+import java.awt.Component
 import java.awt.Frame
 import java.awt.GraphicsEnvironment
 import java.awt.KeyEventDispatcher
@@ -193,6 +195,7 @@ internal class DesktopAppFullscreenController {
 
         val wasMaximized = (window as? Frame)?.extendedState == Frame.MAXIMIZED_BOTH ||
             windowState.placement == WindowPlacement.Maximized
+        val focusOwner = window.focusOwner
 
         val hwnd = AwtNativeViewResolver.resolveNativeViewPointer(window)
         NativePlayerBridge.setWindowBorderlessFullscreen(
@@ -209,11 +212,30 @@ internal class DesktopAppFullscreenController {
             wasMaximized = wasMaximized,
         )
         window.toFront()
-        window.requestFocus()
+        restoreFocusOwner(window, focusOwner)
+    }
+
+    /**
+     * Gives keyboard focus back to the component that had it (Compose's canvas)
+     * rather than the frame itself. Focusing the frame makes Compose release its
+     * focus, which drops the focused item and the controller's focus ring.
+     */
+    private fun restoreFocusOwner(window: Window, focusOwner: Component?) {
+        val target = focusOwner?.takeIf { it !== window && it.isShowing } ?: window.mostRecentFocusOwner
+        if (target == null || target === window) {
+            window.requestFocus()
+            return
+        }
+        target.requestFocus()
+        // The frame change can still shift focus once the native resize lands.
+        SwingUtilities.invokeLater {
+            if (target.isShowing && !target.isFocusOwner && window.isActive) target.requestFocus()
+        }
     }
 
     private fun exitWindowsFullscreen(window: Window, windowState: WindowState? = null) {
         val fullscreenState = windowsFullscreenState?.takeIf { it.window === window } ?: return
+        val focusOwner = window.focusOwner
         NativePlayerBridge.setWindowBorderlessFullscreen(
             windowHwnd = fullscreenState.windowHwnd,
             fullscreen = false,
@@ -237,6 +259,7 @@ internal class DesktopAppFullscreenController {
             window.revalidate()
             window.repaint()
         }
+        if (focusOwner != null && window.isActive) restoreFocusOwner(window, focusOwner)
     }
 
     private data class WindowsFullscreenState(
@@ -269,7 +292,22 @@ internal fun applyMacosComposeFullscreenExit(
 }
 
 internal fun installDesktopAppFullscreenShortcuts(window: Window): () -> Unit {
+    // Set while an Escape that left fullscreen is still held, so its typed and
+    // released events don't also reach the app as a Back press.
+    var swallowEscape = false
     val dispatcher = KeyEventDispatcher { event ->
+        if (event.keyCode == KeyEvent.VK_ESCAPE || event.keyChar == '\u001B') {
+            if (swallowEscape) {
+                if (event.id == KeyEvent.KEY_RELEASED) swallowEscape = false
+                return@KeyEventDispatcher true
+            }
+            if (event.isEscapeLeavingFullscreen(window)) {
+                swallowEscape = true
+                toggleDesktopAppFullscreen(window)
+                return@KeyEventDispatcher true
+            }
+            return@KeyEventDispatcher false
+        }
         if (!event.isDesktopAppFullscreenShortcut()) return@KeyEventDispatcher false
         toggleDesktopAppFullscreen(window)
         true
@@ -278,6 +316,19 @@ internal fun installDesktopAppFullscreenShortcuts(window: Window): () -> Unit {
     return {
         KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(dispatcher)
     }
+}
+
+/**
+ * A keyboard Escape in this window while it is fullscreen. The controller's B
+ * button posts Escape too (as a [SyntheticKeyEvent]); that one stays Back.
+ */
+private fun KeyEvent.isEscapeLeavingFullscreen(window: Window): Boolean {
+    if (id != KeyEvent.KEY_PRESSED || keyCode != KeyEvent.VK_ESCAPE) return false
+    if (this is SyntheticKeyEvent || modifiersEx != 0) return false
+    val source = component ?: return false
+    val sourceWindow = source as? Window ?: SwingUtilities.getWindowAncestor(source)
+    if (sourceWindow !== window) return false
+    return isDesktopAppFullscreen(window)
 }
 
 private fun KeyEvent.isDesktopAppFullscreenShortcut(): Boolean {
