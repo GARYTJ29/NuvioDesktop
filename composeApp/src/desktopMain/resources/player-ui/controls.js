@@ -518,14 +518,15 @@ const chromeInteractionSelector = [
   ".next-episode-card",
 ].join(",");
 
-const send = (type, value = 0) => {
+const send = (type, value = 0, extra = null) => {
+  const message = extra ? { ...extra, type, value } : { type, value };
   const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.player;
   if (bridge) {
-    bridge.postMessage({ type, value });
+    bridge.postMessage(message);
     return;
   }
   const webViewBridge = window.chrome && window.chrome.webview;
-  if (webViewBridge) webViewBridge.postMessage({ type, value });
+  if (webViewBridge) webViewBridge.postMessage(message);
 };
 
 const syncFullscreenButtons = () => {
@@ -2739,6 +2740,7 @@ const renderChrome = () => {
   root.classList.toggle("pip-mode", Boolean(state.isInPip));
   if (!state.isInPip && isPipLocked) setPipLocked(false);
   root.classList.toggle("chrome-hidden", Boolean(showError || !state.controlsVisible));
+  if (showError || !state.controlsVisible) clearSeekHoverPreview();
   root.classList.toggle("modal-open", Boolean(activeModal));
   root.classList.toggle("info-open", activeModal === "streamInfo");
   root.classList.toggle("source-visible", Boolean(!showError && !isPlaying && !state.isLoading && (state.streamTitle || state.providerName)));
@@ -3502,6 +3504,39 @@ nextEpisodeCard.addEventListener("click", event => {
     send("playNextEpisode", 0);
   }
 });
+
+// Seek-bar hover preview (thumbfast). The host draws the thumbnail as an mpv
+// overlay in the video window, which shares this page's origin and size, so the
+// anchor goes out in physical pixels. thumbfast treats it as the thumbnail's
+// bottom-centre: centred on the cursor, a small gap above the bar.
+const seekHoverGapPx = 14;
+// var, not let: renderChrome() can call clearSeekHoverPreview() before this line runs.
+var seekHoverActive = false;
+
+const sendSeekHoverPreview = event => {
+  const durationMs = Math.max(0, Number(state.durationMs) || 0);
+  const rect = seek.getBoundingClientRect();
+  if (durationMs <= 0 || rect.width <= 0 || !state.controlsVisible) {
+    clearSeekHoverPreview();
+    return;
+  }
+  const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  const scale = window.devicePixelRatio || 1;
+  const x = Math.round(Math.max(rect.left, Math.min(rect.right, event.clientX)) * scale);
+  const y = Math.round(Math.max(0, rect.top - seekHoverGapPx) * scale);
+  seekHoverActive = true;
+  send("seekHover", (durationMs * fraction) / 1000, { x, y });
+};
+
+function clearSeekHoverPreview() {
+  if (!seekHoverActive) return;
+  seekHoverActive = false;
+  send("seekLeave", 0);
+}
+
+seek.addEventListener("pointermove", sendSeekHoverPreview);
+seek.addEventListener("pointerleave", clearSeekHoverPreview);
+seek.addEventListener("pointercancel", clearSeekHoverPreview);
 
 seek.addEventListener("input", () => {
   noteChromeActivity();

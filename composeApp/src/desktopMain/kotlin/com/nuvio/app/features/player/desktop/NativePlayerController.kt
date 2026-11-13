@@ -1220,6 +1220,8 @@ private fun String.toPlaybackLogKey(): String {
 
 private fun String.shouldLogNativeControlEvent(): Boolean {
     val normalized = lowercase()
+    // Hover previews fire on every pointer move over the seek bar.
+    if (normalized == "seekhover" || normalized == "seekleave") return false
     return normalized.contains("audio") ||
         normalized.contains("subtitle") ||
         normalized.contains("speed") ||

@@ -912,6 +912,12 @@ val prepareWindowsPlayerRuntime = tasks.register<Sync>("prepareWindowsPlayerRunt
             from(windowsLibmpvDll)
         }
     }
+    // Seek-bar hover thumbnails: forked thumbfast.lua (loaded into libmpv) plus the
+    // standalone mpv.exe it spawns to decode frames. Kept flat next to libmpv so the
+    // runtime index and local-build copy pick them up unchanged.
+    from(layout.projectDirectory.dir("src/desktopMain/native/windows/thumbfast")) {
+        include("thumbfast.lua", "mpv.exe")
+    }
 }
 
 val generateWindowsPlayerRuntimeIndex = tasks.register<GenerateNativeRuntimeIndexTask>("generateWindowsPlayerRuntimeIndex") {
