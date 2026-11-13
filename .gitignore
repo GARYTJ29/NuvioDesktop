@@ -57,3 +57,6 @@ dist/
 # Local backend config for scripts\build.bat (Supabase URL / anon key)
 scripts/nuvio.local.env
 *.local.env
+
+# Standalone mpv.exe for thumbfast seek previews (~113 MB): supply locally, never commit
+composeApp/src/desktopMain/native/windows/thumbfast/mpv.exe
