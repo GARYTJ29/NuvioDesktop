@@ -873,8 +873,12 @@ const renderPlayerBadges = () => {
   badges.forEach((badge) => {
     const chip = document.createElement("span");
     chip.className = "player-badge";
-    if (String(badge.tagStyle || "").toLowerCase() === "filled" && badge.tagColor) chip.style.background = badge.tagColor;
-    if (badge.borderColor) chip.style.borderColor = badge.borderColor;
+    if (String(badge.tagStyle || "").toLowerCase() === "filled") {
+      const bg = formatCssColor(badge.tagColor);
+      if (bg) chip.style.background = bg;
+    }
+    const borderColor = formatCssColor(badge.borderColor);
+    if (borderColor) chip.style.borderColor = borderColor;
     const image = document.createElement("img");
     image.alt = badge.name || "";
     image.draggable = false;
@@ -2392,7 +2396,7 @@ const renderChapterMarks = () => {
     }
   }
   const index = currentChapterIndex(chapters);
-  setText(chapterTitle, index >= 0 ? chapters[index].title : "");
+  setText(chapterTitle, index >= 0 && state.chapterTitleEnabled !== false ? chapters[index].title : "");
 };
 
 const renderActiveModal = (modalOpened = false) => {
