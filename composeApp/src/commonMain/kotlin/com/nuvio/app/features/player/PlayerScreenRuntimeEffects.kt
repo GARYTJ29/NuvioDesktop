@@ -74,8 +74,12 @@ private data class PlayerSnapshotSignals(
  * True when the app already knows it has no usable connection. Unknown/Checking states are
  * treated as "not offline" so we never suppress work we are not sure about.
  */
+// Player network work (stream search, preload, addon subtitles) goes to addons and
+// other third parties, not Nuvio's servers, so only a lost internet connection
+// counts. ServersUnreachable means just the Nuvio backend is down, and must not
+// block e.g. the next-episode button.
 internal fun isNetworkOffline(): Boolean =
-    NetworkStatusRepository.uiState.value.isOfflineLike
+    NetworkStatusRepository.uiState.value.condition == NetworkCondition.NoInternet
 
 @Composable
 private fun rememberNetworkCondition(): NetworkCondition {
