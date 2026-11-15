@@ -140,17 +140,45 @@
 
   // --- control-bar nav mode ------------------------------------------------
   // X puts a focus ring on the control bar and the d-pad walks it, instead of
-  // seeking and changing volume. X again drops the ring.
-  const setNavMode = on => {
+  // seeking and changing volume. X again drops the ring and hides the bar.
+  // The bar re-applies its ring from focusedActionCommand on every render, so
+  // that is cleared while nav mode is off and restored on the next X.
+  let navLastCommand = "";
+  const setNavMode = (on, { hide = false } = {}) => {
     navMode = on;
     if (on) {
       wakeControls();
+      if (navLastCommand && !focusedActionCommand) focusedActionCommand = navLastCommand;
       ensureActionFocus({ focus: true });
     } else {
+      navLastCommand = focusedActionCommand || navLastCommand;
+      focusedActionCommand = "";
       document.querySelectorAll(".action-pill .action.focused")
         .forEach(button => button.classList.remove("focused"));
-      focusShortcutRoot();
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      if (hide) setChromeVisibleFromKeyboard(false);
+      else focusShortcutRoot();
     }
+  };
+
+  // --- volume ----------------------------------------------------------------
+  // The keyboard stops at 100%; the pad can boost to the slider's maximum. A
+  // held press still stops at 100%, so boosting takes a fresh press.
+  const gamepadVolume = (delta, repeat) => {
+    const current = typeof state.volumeLevel === "number" && Number.isFinite(state.volumeLevel)
+      ? state.volumeLevel
+      : 1;
+    const atStandardMax = Math.abs(current - standardMaxVolumeLevel) < 1e-6;
+    if (delta < 0 || current < standardMaxVolumeLevel - 1e-6 || (atStandardMax && repeat)) {
+      sendKeyboardVolume(delta);
+      return;
+    }
+    const next = clampVolumeLevel(Math.round((current + volumeStepLevel) * 100) / 100);
+    state.volumeLevel = next;
+    preMuteVolumeLevel = next;
+    syncVolumeControl();
+    showPlayerToast(volumeToastLabel(delta));
+    send("volumeChange", next);
   };
 
   // --- menus -----------------------------------------------------------------
@@ -241,7 +269,7 @@
   };
 
   // --- bindings --------------------------------------------------------------
-  const press =(name, { rb = false } = {}) => {
+  const press =(name, { rb = false, repeat = false } = {}) => {
     held.add(name);
     document.documentElement.classList.add("gamepad-active");
     if (scrub && !(name in SEEK_BUTTONS)) scrubCommit();
@@ -250,8 +278,13 @@
       else if (name === "A") sendKey("Escape", "Escape");
       return;
     }
-    wakeControls();
     const menuOpen = Boolean(activeModal) || isPartyConfirmOpen();
+    // Second X: hide the bar without waking it first.
+    if (name === "X" && !rb && !menuOpen && navMode) {
+      setNavMode(false, { hide: true });
+      return;
+    }
+    wakeControls();
 
     if (menuOpen) {
       switch (name) {
@@ -267,11 +300,11 @@
     switch (name) {
       case "UP":
         if (navMode) return;
-        sendKeyboardVolume(1);
+        gamepadVolume(1, repeat);
         return;
       case "DOWN":
         if (navMode) return;
-        sendKeyboardVolume(-1);
+        gamepadVolume(-1, repeat);
         return;
       case "LEFT":
       case "RIGHT":
@@ -312,7 +345,7 @@
         return;
       case "X":
         if (rb) sendKey("Backquote", "`");
-        else setNavMode(!navMode);
+        else setNavMode(true);
         return;
       case "Y":
         sendKey(rb ? "KeyA" : "KeyS", rb ? "a" : "s");
