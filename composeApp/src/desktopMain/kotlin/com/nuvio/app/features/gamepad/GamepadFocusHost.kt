@@ -11,6 +11,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -39,7 +40,9 @@ import com.nuvio.app.core.input.AppNavigationBridge
 import com.nuvio.app.core.input.NavigationDirection
 import com.nuvio.app.features.player.desktop.toggleDesktopAppFullscreen
 import com.nuvio.app.postPreciseWheel
+import co.touchlab.kermit.Logger
 import java.awt.AWTEvent
+import java.awt.Component
 import java.awt.KeyboardFocusManager
 import java.awt.Point
 import java.awt.Toolkit
@@ -47,6 +50,9 @@ import java.awt.Window
 import java.awt.event.AWTEventListener
 import java.awt.event.MouseEvent
 import javax.swing.SwingUtilities
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 // The shell scrolled by three steps of 30px when the d-pad found nothing further
 // in its direction.
@@ -56,10 +62,24 @@ private const val EdgeScrollPx = 90f
 // poller sends one every ~8ms while the stick is deflected.
 private const val ScrollGestureGapMs = 250L
 
-// Focus requests land asynchronously on Windows; poll this long for one to
-// arrive before seeding the first focused item.
-private const val FocusSettleStepMs = 30
-private const val FocusSettleAttempts = 10
+// After the player closes, the screen it returns to may take a few frames to
+// compose; keep offering focus this often, for up to two seconds.
+private const val FocusSettleStepMs = 50L
+private const val FocusSettleAttempts = 40
+
+private val log = Logger.withTag("GamepadFocus")
+
+/**
+ * Focus facts read outside composition. Updated straight from onFocusChanged:
+ * a rememberUpdatedState copy would only catch up on the next recomposition,
+ * too late for a retry loop or a press handled in the same frame.
+ */
+private class FocusTracker {
+    var hostHasFocus = false
+
+    /** The AWT component that held focus the last time Compose had it. */
+    var composeComponent: Component? = null
+}
 
 /**
  * Where the wheel events of the current stick gesture go, in host pixels. It
@@ -86,6 +106,7 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
     val settings by DesktopControllerSettings.state.collectAsState()
     val connected by GamepadRouter.connected.collectAsState()
     var hostHasFocus by remember { mutableStateOf(false) }
+    val focusTracker = remember { FocusTracker() }
     // The focused item's bounds in this host's coordinates, read every frame
     // while a pad is connected so the ring follows scrolling lists.
     val focusProbe = remember { FocusRectProbe() }
@@ -95,7 +116,6 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
 
     val latestSettings = rememberUpdatedState(settings)
     val latestFocusedBounds = rememberUpdatedState(focusedBounds)
-    val latestHostHasFocus = rememberUpdatedState(hostHasFocus)
     val latestTextInput = rememberUpdatedState(textInputSessions)
 
     // A text field holds an input session for as long as it is focused, which
@@ -175,7 +195,7 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
             }
             return
         }
-        if (latestHostHasFocus.value) {
+        if (focusTracker.hostHasFocus) {
             val navigationDirection = when (button) {
                 GamepadButton.UP -> NavigationDirection.Up
                 GamepadButton.DOWN -> NavigationDirection.Down
@@ -198,55 +218,81 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
         }
     }
 
-    // Puts keyboard focus back on Compose's canvas when the window has lost it
-    // (the player's native views held it and were destroyed), then lets the
-    // first item take Compose focus so the ring shows. Returns false when the
-    // window already had a focus owner.
-    fun restoreFocus(seedItem: Boolean): Boolean {
-        // Any focus owner at all - a dialog window or the PiP window included -
-        // means focus is not lost, and a background app must not grab it.
-        if (KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner != null) return false
+    // Compose's canvas: whichever AWT component holds focus while the host has
+    // Compose focus.
+    fun composeComponent(): Component? =
+        focusTracker.composeComponent?.takeIf { it.isShowing && SwingUtilities.getWindowAncestor(it) === window }
+            ?: window.focusTraversalPolicy?.getDefaultComponent(window)?.takeIf { it !== window && it.isShowing }
+
+    // Whether key presses would miss Compose: the app is in front and focus
+    // sits in this window but on nothing, or on some other component - after
+    // the player, on what is left of its native views. A dialog window or the
+    // PiP window holding focus is not lost focus, and neither is a background
+    // app.
+    fun focusIsLost(): Boolean {
         if (!window.isShowing || !AppForeground.isForeground()) return false
-        val target = window.focusTraversalPolicy?.getDefaultComponent(window)
-            ?.takeIf { it !== window && it.isShowing }
-            ?: window.mostRecentFocusOwner?.takeIf { it !== window && it.isShowing }
-            ?: return false
-        // Focusing the frame itself would make Compose drop its focus; the
-        // canvas has to be the owner.
-        target.requestFocus()
-        if (!seedItem) return true
-        var attempts = 0
-        val timer = javax.swing.Timer(FocusSettleStepMs, null)
-        timer.addActionListener {
-            attempts++
-            val landed = window.focusOwner != null
-            if (landed || attempts >= FocusSettleAttempts) {
-                timer.stop()
-                if (landed && !latestHostHasFocus.value) AwtKeys.tab(backwards = false)
-            } else if (attempts == 1) {
-                target.requestFocus()
+        val owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner ?: return true
+        val ownerWindow = owner as? Window ?: SwingUtilities.getWindowAncestor(owner)
+        if (ownerWindow !== window) return false
+        val compose = composeComponent() ?: return false
+        return owner !== compose
+    }
+
+    val scope = rememberCoroutineScope()
+    var recovery by remember { mutableStateOf<Job?>(null) }
+
+    // Puts AWT focus back on Compose's canvas, and keeps offering Compose
+    // focus to the first item until one takes it: the screen the player
+    // returns to may still be composing. Only runs when no dialog can be
+    // holding Compose focus (the player just closed, or focus left Compose
+    // altogether), so seeding the main layer steals nothing.
+    fun recoverFocus(reason: String, seedItem: Boolean) {
+        recovery?.cancel()
+        recovery = scope.launch {
+            repeat(FocusSettleAttempts) { attempt ->
+                if (focusTracker.hostHasFocus) {
+                    if (attempt > 0) log.d { "focus recovered ($reason) after $attempt attempts" }
+                    return@launch
+                }
+                if (!AppForeground.isForeground()) return@launch
+                val compose = composeComponent()
+                val owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner
+                if (attempt == 0) {
+                    log.d {
+                        "recovering focus ($reason): owner=${owner?.javaClass?.name} " +
+                            "compose=${compose?.javaClass?.name}"
+                    }
+                }
+                if (compose != null && owner !== compose) compose.requestFocus()
+                if (seedItem && !focusManager.moveFocus(FocusDirection.Next) && owner === compose) {
+                    AwtKeys.tab(backwards = false)
+                }
+                if (!seedItem && owner === compose) return@launch
+                delay(FocusSettleStepMs)
             }
+            log.w { "focus recovery ($reason) gave up" }
         }
-        timer.start()
-        return true
     }
 
     DisposableEffect(window) {
         val playerClosed = {
-            // This fires while the player is being disposed; wait for its
-            // video panel to leave the window before choosing a focus target.
+            // This fires while the player is being disposed; let its video
+            // panel leave the window before choosing a focus target.
             SwingUtilities.invokeLater {
                 val current = latestSettings.value
                 val padDriving = GamepadRouter.connected.value && current.enabled && current.focusNavigation
-                restoreFocus(seedItem = padDriving)
+                recoverFocus("player closed", seedItem = padDriving)
             }
         }
         GamepadRouter.playerClosedListener = playerClosed
         val handler = object : GamepadInputHandler {
             override fun onPress(press: GamepadPress): Boolean {
-                // A press while nothing in the window has focus would go
-                // nowhere: spend it on getting focus back instead.
-                if (restoreFocus(seedItem = latestSettings.value.focusNavigation)) return true
+                // A press while focus is off Compose would go nowhere: spend it
+                // on getting focus back instead.
+                if (focusIsLost()) {
+                    recoverFocus("press ${press.button}", seedItem = latestSettings.value.focusNavigation)
+                    return true
+                }
                 when (press.button) {
                     GamepadButton.UP, GamepadButton.DOWN,
                     GamepadButton.LEFT, GamepadButton.RIGHT -> navigate(press.button)
@@ -304,7 +350,15 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .onFocusChanged { hostHasFocus = it.hasFocus }
+            .onFocusChanged {
+                hostHasFocus = it.hasFocus
+                focusTracker.hostHasFocus = it.hasFocus
+                if (it.hasFocus) {
+                    KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner
+                        ?.takeIf { owner -> SwingUtilities.getWindowAncestor(owner) === window }
+                        ?.let { owner -> focusTracker.composeComponent = owner }
+                }
+            }
             .then(FocusRectProbeElement(focusProbe)),
     ) {
         InterceptPlatformTextInput(textInputInterceptor) {

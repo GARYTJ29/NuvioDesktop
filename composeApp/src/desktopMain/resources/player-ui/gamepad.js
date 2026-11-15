@@ -227,13 +227,27 @@
     if (modal) spatialMove(modal, "down");
   };
 
+  // B leaves the player in one press. The keyboard's Escape steps out of
+  // fullscreen first; on a pad that is a wasted press, and the app stays
+  // fullscreen on the screen B returns to. PiP still exits on B, as there is
+  // no back in the floating window.
+  const leavePlayer = () => {
+    if (state.isInPip) {
+      sendKey("Escape", "Escape");
+      return;
+    }
+    clearSpaceHoldTimerAndStopSpeedBoost();
+    send("back", 0);
+  };
+
   // --- bindings --------------------------------------------------------------
-  const press = (name, { rb = false } = {}) => {
+  const press =(name, { rb = false } = {}) => {
     held.add(name);
     document.documentElement.classList.add("gamepad-active");
     if (scrub && !(name in SEEK_BUTTONS)) scrubCommit();
     if (playbackErrorText()) {
-      if (name === "B" || name === "A") sendKey("Escape", "Escape");
+      if (name === "B") leavePlayer();
+      else if (name === "A") sendKey("Escape", "Escape");
       return;
     }
     wakeControls();
@@ -294,7 +308,7 @@
           setNavMode(false);
           return;
         }
-        sendKey("Escape", "Escape");
+        leavePlayer();
         return;
       case "X":
         if (rb) sendKey("Backquote", "`");
