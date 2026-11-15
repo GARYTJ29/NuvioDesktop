@@ -79,16 +79,24 @@ if not exist "%APP_SRC%\Nuvio.exe" (
 
 REM --- Stage dist\NuvioDesktop with the launcher renamed -----------------------
 REM jpackage's launcher reads app\<exe name>.cfg, so the .cfg must be renamed too.
+REM /MIR copies only files that changed since the last build (usually one jar)
+REM and removes stale ones, instead of re-copying the whole ~300MB image. The
+REM launcher and its .cfg are excluded from the mirror - excluded files are
+REM also never purged - and copied under their new names afterwards.
 set "DIST=%ROOT%\dist\NuvioDesktop"
-if exist "%DIST%" rmdir /s /q "%DIST%"
 echo [build] Staging %DIST% ...
-robocopy "%APP_SRC%" "%DIST%" /E /NFL /NDL /NJH /NJS /NP >nul
+robocopy "%APP_SRC%" "%DIST%" /MIR /XF Nuvio.exe Nuvio.cfg NuvioDesktop.exe NuvioDesktop.cfg /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 (
     echo [build] robocopy failed.
     goto :fail
 )
-ren "%DIST%\Nuvio.exe" NuvioDesktop.exe || goto :fail
-ren "%DIST%\app\Nuvio.cfg" NuvioDesktop.cfg || goto :fail
+REM jpackage marks the launcher read-only, which copy /y cannot overwrite.
+if exist "%DIST%\NuvioDesktop.exe" del /f /q "%DIST%\NuvioDesktop.exe" || goto :fail
+copy /y "%APP_SRC%\Nuvio.exe" "%DIST%\NuvioDesktop.exe" >nul || goto :fail
+copy /y "%APP_SRC%\app\Nuvio.cfg" "%DIST%\app\NuvioDesktop.cfg" >nul || goto :fail
+REM Older builds staged a plain copy; drop any leftover original names.
+if exist "%DIST%\Nuvio.exe" del /f /q "%DIST%\Nuvio.exe"
+if exist "%DIST%\app\Nuvio.cfg" del /q "%DIST%\app\Nuvio.cfg"
 
 REM --- Optional MSI -------------------------------------------------------------
 if "%DO_MSI%"=="1" (

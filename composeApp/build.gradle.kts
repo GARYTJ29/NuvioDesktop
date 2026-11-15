@@ -876,8 +876,11 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
         powershellCommand,
     )
 }
+// Up-to-date checks on the declared inputs/outputs decide when this reruns, so
+// an edit to player_bridge.cpp rebuilds the DLL without a clean build. Keep the
+// task free of script references: one would make Gradle discard the
+// configuration cache on every build.
 val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") {
-    notCompatibleWithConfigurationCache("Builds a host-local player bridge against WebView2 and libmpv for Windows.")
     enabled = isWindowsHost
     inputs.file(windowsPlayerBridgeSource)
     if (windowsWebView2IncludeDir.exists()) {
@@ -889,7 +892,6 @@ val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") 
     outputs.file(windowsPlayerBridgeOutput)
     outputs.file(windowsPlayerBridgeImportLib)
     outputs.file(windowsPlayerBridgePdb)
-    onlyIf { !windowsPlayerBridgeOutput.get().asFile.exists() }
     commandLine(windowsPlayerBridgeCommand)
 }
 
@@ -965,19 +967,28 @@ val prepareMacosPlayerAppResources = tasks.register<Sync>("prepareMacosPlayerApp
     into(macosPlayerAppResourcesRoot.map { it.dir("macos/native/macos") })
 }
 
-tasks.withType<Jar>().configureEach {
-    if (isWindowsHost && name == "desktopJar") {
-        dependsOn(buildWindowsPlayerBridge, prepareWindowsPlayerRuntime, generateWindowsPlayerRuntimeIndex)
-        from(windowsPlayerBridgeOutput) {
-            into("native/windows")
-        }
-        from(windowsPlayerRuntimeOutput) {
-            into("native/windows")
-        }
-        from(layout.projectDirectory.file("src/desktopMain/native/windows/engine/nuvio_engine.dll")) {
-            into("native/windows")
-        }
+// The Windows player natives (~240MB: libmpv, mpv.exe, the engine, the bridge)
+// live in their own jar on the desktop runtime classpath rather than in
+// desktopJar. They are still found as /native/windows/* classpath resources,
+// but a Kotlin-only change no longer recompresses them: this jar rebuilds only
+// when a native file changes.
+val desktopWindowsNativesJar = tasks.register<Jar>("desktopWindowsNativesJar") {
+    enabled = isWindowsHost
+    dependsOn(buildWindowsPlayerBridge, prepareWindowsPlayerRuntime, generateWindowsPlayerRuntimeIndex)
+    archiveFileName.set("nuvio-windows-natives.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("native/windows-jar"))
+    from(windowsPlayerBridgeOutput) {
+        into("native/windows")
     }
+    from(windowsPlayerRuntimeOutput) {
+        into("native/windows")
+    }
+    from(layout.projectDirectory.file("src/desktopMain/native/windows/engine/nuvio_engine.dll")) {
+        into("native/windows")
+    }
+}
+
+tasks.withType<Jar>().configureEach {
     if (isLinuxHost && name == "desktopJar") {
         dependsOn(buildLinuxPlayerBridge)
         from(linuxPlayerBridgeOutput) {
@@ -1194,6 +1205,9 @@ kotlin {
                 implementation(libs.sentry.jvm)
                 implementation(libs.jna)
                 implementation(files("libs/nuvio-engine-jvm-0.1.6.jar"))
+                if (isWindowsHost) {
+                    runtimeOnly(files(desktopWindowsNativesJar))
+                }
             }
         }
         val androidHostTest by getting {

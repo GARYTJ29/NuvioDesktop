@@ -43,6 +43,18 @@ internal object GamepadRouter {
 
     var browseHandler: GamepadInputHandler? = null
     var playerHandler: GamepadInputHandler? = null
+        set(value) {
+            val closed = field != null && value == null
+            field = value
+            if (closed) playerClosedListener?.invoke()
+        }
+
+    /**
+     * Called on the Swing thread once the player stops taking input. The
+     * player's native views held keyboard focus, and Windows does not hand it
+     * back to the app window when they are destroyed.
+     */
+    var playerClosedListener: (() -> Unit)? = null
 
     /** LB+X, from anywhere. Set by the power menu. */
     var powerMenuOpener: (() -> Unit)? = null

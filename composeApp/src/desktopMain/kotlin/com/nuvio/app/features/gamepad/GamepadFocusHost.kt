@@ -40,6 +40,7 @@ import com.nuvio.app.core.input.NavigationDirection
 import com.nuvio.app.features.player.desktop.toggleDesktopAppFullscreen
 import com.nuvio.app.postPreciseWheel
 import java.awt.AWTEvent
+import java.awt.KeyboardFocusManager
 import java.awt.Point
 import java.awt.Toolkit
 import java.awt.Window
@@ -54,6 +55,11 @@ private const val EdgeScrollPx = 90f
 // Stick ticks closer together than this belong to one scroll gesture. The
 // poller sends one every ~8ms while the stick is deflected.
 private const val ScrollGestureGapMs = 250L
+
+// Focus requests land asynchronously on Windows; poll this long for one to
+// arrive before seeding the first focused item.
+private const val FocusSettleStepMs = 30
+private const val FocusSettleAttempts = 10
 
 /**
  * Where the wheel events of the current stick gesture go, in host pixels. It
@@ -192,9 +198,55 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
         }
     }
 
+    // Puts keyboard focus back on Compose's canvas when the window has lost it
+    // (the player's native views held it and were destroyed), then lets the
+    // first item take Compose focus so the ring shows. Returns false when the
+    // window already had a focus owner.
+    fun restoreFocus(seedItem: Boolean): Boolean {
+        // Any focus owner at all - a dialog window or the PiP window included -
+        // means focus is not lost, and a background app must not grab it.
+        if (KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner != null) return false
+        if (!window.isShowing || !AppForeground.isForeground()) return false
+        val target = window.focusTraversalPolicy?.getDefaultComponent(window)
+            ?.takeIf { it !== window && it.isShowing }
+            ?: window.mostRecentFocusOwner?.takeIf { it !== window && it.isShowing }
+            ?: return false
+        // Focusing the frame itself would make Compose drop its focus; the
+        // canvas has to be the owner.
+        target.requestFocus()
+        if (!seedItem) return true
+        var attempts = 0
+        val timer = javax.swing.Timer(FocusSettleStepMs, null)
+        timer.addActionListener {
+            attempts++
+            val landed = window.focusOwner != null
+            if (landed || attempts >= FocusSettleAttempts) {
+                timer.stop()
+                if (landed && !latestHostHasFocus.value) AwtKeys.tab(backwards = false)
+            } else if (attempts == 1) {
+                target.requestFocus()
+            }
+        }
+        timer.start()
+        return true
+    }
+
     DisposableEffect(window) {
+        val playerClosed = {
+            // This fires while the player is being disposed; wait for its
+            // video panel to leave the window before choosing a focus target.
+            SwingUtilities.invokeLater {
+                val current = latestSettings.value
+                val padDriving = GamepadRouter.connected.value && current.enabled && current.focusNavigation
+                restoreFocus(seedItem = padDriving)
+            }
+        }
+        GamepadRouter.playerClosedListener = playerClosed
         val handler = object : GamepadInputHandler {
             override fun onPress(press: GamepadPress): Boolean {
+                // A press while nothing in the window has focus would go
+                // nowhere: spend it on getting focus back instead.
+                if (restoreFocus(seedItem = latestSettings.value.focusNavigation)) return true
                 when (press.button) {
                     GamepadButton.UP, GamepadButton.DOWN,
                     GamepadButton.LEFT, GamepadButton.RIGHT -> navigate(press.button)
@@ -238,6 +290,7 @@ internal fun GamepadFocusHost(window: Window, content: @Composable () -> Unit) {
         onDispose {
             Toolkit.getDefaultToolkit().removeAWTEventListener(mouseListener)
             if (GamepadRouter.browseHandler === handler) GamepadRouter.browseHandler = null
+            if (GamepadRouter.playerClosedListener === playerClosed) GamepadRouter.playerClosedListener = null
         }
     }
 
