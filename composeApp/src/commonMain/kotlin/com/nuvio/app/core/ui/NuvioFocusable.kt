@@ -1,45 +1,73 @@
 package com.nuvio.app.core.ui
 
-import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.nuvio.app.controller.FocusRingRegistry
+import com.nuvio.app.controller.FocusRingTarget
 import com.nuvio.app.isDesktop
 import kotlin.concurrent.Volatile
 
+/**
+ * Marks a Compose-focusable element for the keyboard/controller focus ring. The ring itself is drawn
+ * once, above the app, by [com.nuvio.app.controller.FocusRingOverlay], which glides it between
+ * elements; this only reports where the focused element is and what shape it has. It shows while
+ * the user navigates with arrows or a controller, not after a mouse click.
+ *
+ * [borderWidth] is kept for existing callers; the overlay draws every ring the same width.
+ */
+@Suppress("UNUSED_PARAMETER")
 fun Modifier.nuvioFocusBorder(
     shape: Shape,
     borderWidth: Dp = 3.dp,
 ): Modifier = composed {
+    if (!isDesktop) return@composed this
+    val owner = remember { Any() }
     var focused by remember { mutableStateOf(false) }
-    val tokens = MaterialTheme.nuvio
+    var bounds by remember { mutableStateOf(Rect.Zero) }
+    val latestShape by rememberUpdatedState(shape)
+    fun report() {
+        if (focused && bounds.width > 0f && bounds.height > 0f) {
+            FocusRingRegistry.reportCompose(FocusRingTarget(owner, bounds, latestShape))
+        } else {
+            FocusRingRegistry.clearCompose(owner)
+        }
+    }
+    DisposableEffect(owner) {
+        onDispose { FocusRingRegistry.clearCompose(owner) }
+    }
     this
-        .onFocusChanged { focused = it.isFocused }
-        .then(
-            if (focused && isDesktop) Modifier.border(
-                width = borderWidth,
-                color = tokens.colors.focusRing,
-                shape = shape,
-            ) else Modifier,
-        )
+        .onFocusChanged {
+            focused = it.isFocused
+            report()
+        }
+        .onGloballyPositioned { coordinates ->
+            if (!coordinates.isAttached) return@onGloballyPositioned
+            val position = coordinates.positionInRoot()
+            bounds = Rect(position, Size(coordinates.size.width.toFloat(), coordinates.size.height.toFloat()))
+            if (focused) report()
+        }
 }
 
 /**

@@ -73,6 +73,7 @@ internal object DesktopControllerInput {
         worker?.interrupt()
         worker = null
         started.set(false)
+        ControllerManager.updateConnectedCount(0)
     }
 
     // ------------------------------------------------------------------ shared state machine
@@ -266,6 +267,7 @@ internal object DesktopControllerInput {
                 if (connectedIndex == -1) continue
                 input.reset()
                 log.i { "controller connected (xinput $connectedIndex)" }
+                ControllerManager.updateConnectedCount(1)
             }
 
             val rc = runCatching { xinput.XInputGetState(connectedIndex, state) }
@@ -273,6 +275,7 @@ internal object DesktopControllerInput {
             if (rc != 0) {
                 if (rc == ERROR_DEVICE_NOT_CONNECTED) {
                     log.i { "controller disconnected" }
+                    ControllerManager.updateConnectedCount(0)
                     input.reset()
                     connectedIndex = -1
                 }
@@ -413,6 +416,7 @@ internal object DesktopControllerInput {
                         controllers.remove(instanceId)
                         padStates.remove(instanceId)
                         log.i { "controller disconnected (instance $instanceId)" }
+                        ControllerManager.updateConnectedCount(controllers.size)
                     }
                 }
 
@@ -433,6 +437,7 @@ internal object DesktopControllerInput {
                         padStates[key] = PadState()
                         val name = runCatching { sdl.SDL_GameControllerName(opened) }.getOrNull()
                         log.i { "controller connected (instance $key): ${name ?: "unknown"}" }
+                        ControllerManager.updateConnectedCount(controllers.size)
                     }
                 }
 

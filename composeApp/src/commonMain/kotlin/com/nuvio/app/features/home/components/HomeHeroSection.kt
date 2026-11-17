@@ -46,9 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.focusProperties
-import com.nuvio.app.core.input.NavigationDirection
-import com.nuvio.app.core.input.onDirectionalInput
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -649,9 +646,6 @@ private fun DesktopHomeHeroFrame(
                 .widthIn(max = layout.contentContainerMaxWidth)
                 .fillMaxSize(),
         ) {
-            // The whole content block is one focus stop that outlives the page
-            // layers beneath it: left/right walk the banner, Enter opens the
-            // current item. The page dots stay out of focus navigation.
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
@@ -661,25 +655,7 @@ private fun DesktopHomeHeroFrame(
                         bottom = layout.contentVerticalPadding,
                     )
                     .fillMaxWidth(layout.contentWidthFraction)
-                    .widthIn(max = layout.contentMaxWidth)
-                    .onDirectionalInput { direction ->
-                        val delta = when (direction) {
-                            NavigationDirection.Left -> -1
-                            NavigationDirection.Right -> 1
-                            else -> return@onDirectionalInput false
-                        }
-                        if (items.size <= 1) return@onDirectionalInput false
-                        val target = (pagerState.targetPage + delta).coerceIn(0, pagerState.pageCount - 1)
-                        coroutineScope.launch { pagerState.animateScrollToPage(target) }
-                        true
-                    }
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        enabled = onItemClick != null,
-                    ) {
-                        onItemClick?.invoke(currentHeroItem(items, pagerState))
-                    },
+                    .widthIn(max = layout.contentMaxWidth),
                 contentAlignment = Alignment.BottomStart,
             ) {
                 HeroDesktopContentLayers(
@@ -744,7 +720,7 @@ private fun HeroPageIndicatorRow(
             val activeFraction = heroPageVisibility(pagerState, page)
             Box(
                 modifier = Modifier
-                    .focusProperties { canFocus = false }
+                    .nuvioFocusBorder(CircleShape, borderWidth = 2.dp)
                     .clickable {
                         coroutineScope.launch {
                             pagerState.animateScrollToPage(heroPageForItem(pagerState.currentPage, index, itemCount))
@@ -907,8 +883,7 @@ private fun DesktopHeroContentBlock(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            // The frame's content box takes focus for every page.
-            .focusProperties { canFocus = false }
+            .nuvioFocusBorder(RoundedCornerShape(NuvioTokens.Radius.md))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -986,7 +961,7 @@ private fun DesktopHeroContentBlock(
                 Surface(
                     modifier = Modifier
                         .height(48.dp)
-                        .focusProperties { canFocus = false }
+                        .nuvioFocusBorder(RoundedCornerShape(40.dp))
                         .clickable { onItemClick(item) },
                     color = colorScheme.onBackground,
                     contentColor = colorScheme.background,

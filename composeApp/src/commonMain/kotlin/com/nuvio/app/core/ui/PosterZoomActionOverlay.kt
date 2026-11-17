@@ -6,6 +6,10 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.nuvio.app.controller.ControllerFocusZone
+import com.nuvio.app.controller.RegisterControllerHandler
+import com.nuvio.app.controller.controllerFocusable
+import com.nuvio.app.controller.isControllerNodeFocused
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -255,6 +259,20 @@ fun NuvioPosterZoomActionOverlay(
     PlatformBackHandler(enabled = true) {
         close()
     }
+    // B on a controller: the spatial engine routes it to its handler stack, not to the
+    // platform back handler, while focus sits on the menu rows.
+    RegisterControllerHandler(
+        key = "poster_zoom_overlay",
+        onBack = {
+            close()
+            true
+        },
+        // Tabs, search and options belong to the screen underneath; keep them off while the menu is up.
+        onBumperLeft = { true },
+        onBumperRight = { true },
+        onActionX = { true },
+        onActionY = { true },
+    )
 
     BoxWithConstraints(
         modifier = modifier
@@ -377,6 +395,8 @@ fun NuvioPosterZoomActionOverlay(
                     }
                     PosterZoomMenuRow(
                         action = action,
+                        controllerId = "poster_zoom_action_$index",
+                        isDefaultFocus = index == 0,
                         enabled = phase == PosterZoomPhase.Open,
                         onSelected = { select(action) },
                         modifier = Modifier.graphicsLayer {
@@ -516,15 +536,28 @@ fun NuvioPosterZoomActionOverlay(
 @Composable
 private fun PosterZoomMenuRow(
     action: PosterZoomOverlayAction,
+    controllerId: String,
+    isDefaultFocus: Boolean,
     enabled: Boolean,
     onSelected: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val tokens = MaterialTheme.nuvio
     val contentColor = if (action.isDestructive) tokens.colors.danger else tokens.colors.textPrimary
+    // The menu card clips its rows, so a controller-focused row is highlighted instead of ringed.
+    val controllerFocused = isControllerNodeFocused(controllerId)
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .controllerFocusable(
+                id = controllerId,
+                zone = ControllerFocusZone.Overlay,
+                enabled = enabled,
+                isDefaultFocus = isDefaultFocus,
+                hideFocusRing = true,
+                onSelect = onSelected,
+            )
+            .background(if (controllerFocused) tokens.colors.textPrimary.copy(alpha = 0.14f) else Color.Transparent)
             .clickable(enabled = enabled, onClick = onSelected)
             .padding(horizontal = NuvioTokens.Space.s18, vertical = NuvioTokens.Space.s16),
         horizontalArrangement = Arrangement.spacedBy(NuvioTokens.Space.s12),

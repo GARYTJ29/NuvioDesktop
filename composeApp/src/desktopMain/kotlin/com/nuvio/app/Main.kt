@@ -26,7 +26,7 @@ import com.nuvio.app.core.ui.NuvioTheme
 import com.nuvio.app.core.ui.ProvideDesktopWindowInsets
 import com.nuvio.app.core.ui.platformTouchScroll
 import com.nuvio.app.features.discordrpc.DiscordPresenceManager
-import com.nuvio.app.features.gamepad.GamepadFocusHost
+import com.nuvio.app.features.gamepad.GamepadHost
 import com.nuvio.app.features.p2p.P2pStreamingEngine
 import com.nuvio.app.features.power.PowerHost
 import com.nuvio.app.features.plugins.configureDesktopQuickJsLibrary
@@ -241,7 +241,7 @@ fun main(args: Array<String>) {
                     ProvideDesktopWindowInsets(
                         isFullscreen = windowState.placement == WindowPlacement.Fullscreen,
                     ) {
-                        GamepadFocusHost(window) {
+                        GamepadHost(window) {
                             MiddleClickAutoscroll { App() }
                         }
                     }

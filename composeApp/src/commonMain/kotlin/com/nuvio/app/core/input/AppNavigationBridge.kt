@@ -1,83 +1,28 @@
 package com.nuvio.app.core.input
 
-import com.nuvio.app.AppScreenTab
+import com.nuvio.app.controller.ControllerManager
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Lets platform input that lives outside the Compose tree (the desktop gamepad
- * poller) see where the app is and ask it to switch tabs or reload, without
- * reaching into MainAppContent's state.
+ * bridge) ask the app to reload, and tells hover-driven UI when a controller is
+ * driving, without reaching into MainAppContent's state.
  */
 object AppNavigationBridge {
-    private val tabRequestFlow = MutableSharedFlow<AppScreenTab>(extraBufferCapacity = 4)
-    val tabRequests: SharedFlow<AppScreenTab> = tabRequestFlow.asSharedFlow()
-
     private val reloadRequestFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val reloadRequests: SharedFlow<Unit> = reloadRequestFlow.asSharedFlow()
 
-    private val currentTabState = MutableStateFlow(AppScreenTab.Home)
-    val currentTab: StateFlow<AppScreenTab> = currentTabState.asStateFlow()
-
-    private val onRootTabsState = MutableStateFlow(true)
-
-    /** True while the tab bar's root screen is showing, not a pushed route. */
-    val isOnRootTabs: StateFlow<Boolean> = onRootTabsState.asStateFlow()
-
-    private val playerRouteState = MutableStateFlow(false)
-    val isPlayerRouteActive: StateFlow<Boolean> = playerRouteState.asStateFlow()
-
-    private val directionalInputState = MutableStateFlow(false)
-
     /**
-     * True while a controller is driving the UI, from its last press until the
-     * mouse really moves. Hover-driven chrome (the desktop sidebar) ignores a
-     * parked pointer meanwhile and follows focus instead.
+     * True while a controller or the arrow keys drive the UI, until the mouse
+     * really moves. Hover-driven chrome (the desktop sidebar, poster hover)
+     * ignores a parked pointer meanwhile and follows focus instead.
      */
-    val isDirectionalInputActive: StateFlow<Boolean> = directionalInputState.asStateFlow()
-
-    fun reportDirectionalInput(active: Boolean) {
-        if (directionalInputState.value != active) directionalInputState.value = active
-    }
-
-    private var directionalHandler: DirectionalInputRegistration? = null
-
-    internal fun setDirectionalHandler(registration: DirectionalInputRegistration) {
-        directionalHandler = registration
-    }
-
-    internal fun clearDirectionalHandler(registration: DirectionalInputRegistration) {
-        if (directionalHandler === registration) directionalHandler = null
-    }
-
-    /**
-     * Offers a pad direction to the focused item that registered through
-     * [onDirectionalInput]; true when it used it.
-     */
-    fun dispatchDirectionalInput(direction: NavigationDirection): Boolean =
-        directionalHandler?.handle?.invoke(direction) ?: false
-
-    fun requestTab(tab: AppScreenTab) {
-        tabRequestFlow.tryEmit(tab)
-    }
+    val isDirectionalInputActive: StateFlow<Boolean> get() = ControllerManager.isNavigationActive
 
     fun requestReload() {
         reloadRequestFlow.tryEmit(Unit)
-    }
-
-    fun cycleTab(delta: Int) {
-        val tabs = AppScreenTab.entries
-        val index = tabs.indexOf(currentTabState.value).coerceAtLeast(0)
-        requestTab(tabs[(index + delta).mod(tabs.size)])
-    }
-
-    fun reportState(tab: AppScreenTab, onRootTabs: Boolean, playerRouteActive: Boolean) {
-        currentTabState.value = tab
-        onRootTabsState.value = onRootTabs
-        playerRouteState.value = playerRouteActive
     }
 }

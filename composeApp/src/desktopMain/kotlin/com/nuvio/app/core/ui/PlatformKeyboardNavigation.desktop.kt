@@ -12,6 +12,7 @@ import com.nuvio.app.controller.ControllerFocusEngine
 import com.nuvio.app.controller.ControllerManager
 import com.nuvio.app.controller.ControllerScreenType
 import com.nuvio.app.controller.DesktopControllerInput
+import com.nuvio.app.features.gamepad.SyntheticKeyEvent
 import com.nuvio.app.controller.XboxButton
 import com.nuvio.app.controller.audio.ControllerSoundPlayer
 import com.nuvio.app.controller.audio.DesktopControllerSound
@@ -208,6 +209,9 @@ actual fun PlatformKeyboardNavigationHost() {
     DisposableEffect(Unit) {
         val dispatcher = java.awt.KeyEventDispatcher { event: KeyEvent ->
             if (event.id != KeyEvent.KEY_PRESSED) return@KeyEventDispatcher false
+            // Keys the controller's on-screen keyboard types (caret arrows, Enter) edit the field;
+            // they are not navigation.
+            if (event is SyntheticKeyEvent) return@KeyEventDispatcher false
 
             val isPlayerActive = ControllerManager.screenContext.value.screenType ==
                 ControllerScreenType.Player

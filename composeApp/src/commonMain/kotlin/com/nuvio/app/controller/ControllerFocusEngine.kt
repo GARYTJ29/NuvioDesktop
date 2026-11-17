@@ -663,6 +663,7 @@ object ControllerFocusEngine {
         direction: ControllerDirection? = null,
     ) {
         val previousId = _focusedNodeId.value
+        analogScrolledSinceFocus = false
         _focusedNodeId.value = node.id
         _focusedNodeSnapshot.value = node.toSnapshot()
         if (!isInternalCleanupFocus) {
@@ -1035,19 +1036,8 @@ object ControllerFocusEngine {
         val candidates = row.nodes.filter { !it.id.startsWith("view_all_pill_") }
         if (candidates.isEmpty()) return null
 
-        if (!row.groupKey.isNullOrEmpty()) {
-            val rememberedId = lastFocusedByGroup[row.groupKey]
-            if (rememberedId != null) {
-                val rememberedNode = candidates.firstOrNull { it.id == rememberedId }
-                if (rememberedNode != null) return rememberedNode
-            }
-        }
-
-        if (current.rowItemIndex >= 0) {
-            val matchingIndexNode = candidates.firstOrNull { it.rowItemIndex == current.rowItemIndex }
-            if (matchingIndexNode != null) return matchingIndexNode
-        }
-
+        // Move straight up/down: pick the card visually closest on the X axis, ignoring
+        // which card was last focused in that row or its item index.
         val currentCenterX = current.boundsInRoot.center.x
         return candidates.minByOrNull { abs(it.boundsInRoot.center.x - currentCenterX) }
     }
@@ -1241,8 +1231,59 @@ object ControllerFocusEngine {
             is ControllerEvent.Navigate -> handleNavigate(event.direction)
             is ControllerEvent.ButtonPressed -> handleButtonPressed(event.button)
             is ControllerEvent.ButtonReleased -> false
-            is ControllerEvent.AnalogScroll -> handleAnalogScroll(event.dx, event.dy)
+            is ControllerEvent.AnalogScroll -> handleAnalogScroll(event.dx, event.dy).also { scrolled ->
+                if (scrolled) analogScrolledSinceFocus = true
+            }
         }
+    }
+
+    /**
+     * Set when the right stick scrolls the page and cleared whenever focus moves. While set, the
+     * focused item may have been scrolled out of view, and the next press should pick up from what
+     * is on screen instead of scrolling back to it.
+     */
+    private var analogScrolledSinceFocus = false
+
+    private fun ControllerFocusNode.isMostlyOnScreen(): Boolean {
+        if (!isVisibleAndValid) return false
+        val full = if (unclippedBoundsInRoot.height > 2f) unclippedBoundsInRoot else return true
+        val heightShown = boundsInRoot.height >= full.height * 0.6f
+        val widthShown = full.width <= 2f || boundsInRoot.width >= full.width * 0.6f
+        return heightShown && widthShown
+    }
+
+    /**
+     * After the right stick scrolled the focused item out of view, moves focus to the on-screen
+     * item nearest to it and reports true; the press that triggered this only lands focus there.
+     * Reports false when focus is still in view or there is nothing to land on.
+     */
+    private fun relandAfterAnalogScroll(): Boolean {
+        if (!analogScrolledSinceFocus) return false
+        analogScrolledSinceFocus = false
+        if (nodes.values.any { it.zone == ControllerFocusZone.Overlay && it.isVisibleAndValid }) return false
+        val current = _focusedNodeId.value?.let { nodes[it] }
+        if (current != null && current.zone != ControllerFocusZone.Content) return false
+        if (current != null && current.isMostlyOnScreen()) return false
+        val candidates = nodes.values.filter { it.zone == ControllerFocusZone.Content && it.isMostlyOnScreen() }
+        if (candidates.isEmpty()) return false
+        val anchor = current?.let {
+            if (it.unclippedBoundsInRoot.height > 2f) it.unclippedBoundsInRoot.center else it.boundsInRoot.center
+        }
+        val target = if (anchor != null) {
+            candidates.minBy {
+                hypot(
+                    (it.boundsInRoot.center.x - anchor.x).toDouble(),
+                    (it.boundsInRoot.center.y - anchor.y).toDouble(),
+                )
+            }
+        } else {
+            candidates.minWith(
+                compareBy<ControllerFocusNode> { (it.boundsInRoot.top / 32f).toInt() }
+                    .thenBy { it.boundsInRoot.left },
+            )
+        }
+        focusNodeInternal(target, triggerScroll = false)
+        return true
     }
 
     private fun handleAnalogScroll(dx: Float, dy: Float): Boolean {
@@ -1285,6 +1326,8 @@ object ControllerFocusEngine {
             XboxButton.DPadLeft -> handleNavigate(ControllerDirection.Left)
             XboxButton.DPadRight -> handleNavigate(ControllerDirection.Right)
             XboxButton.A -> {
+                // Focus the stick scrolled out of view lands on screen first; A then selects it.
+                if (relandAfterAnalogScroll()) return true
                 ControllerSoundPlayer.playSelect()
                 if (current == null) {
                     // Nothing spatially focused: seed the engine when possible, otherwise report the
@@ -1721,6 +1764,7 @@ object ControllerFocusEngine {
         if (PlatformVirtualKeyboard.isKeyboardActive) {
             PlatformVirtualKeyboard.hide()
         }
+        if (relandAfterAnalogScroll()) return true
         val overlayNodes = nodes.values.filter { it.zone == ControllerFocusZone.Overlay && it.isVisibleAndValid }
         val activeZone = if (overlayNodes.isNotEmpty()) {
             ControllerFocusZone.Overlay
@@ -2435,16 +2479,33 @@ fun Modifier.controllerFocusable(
         label = "controller_sibling_alpha",
     )
 
+    // The ring itself is drawn once, above everything, by FocusRingOverlay; the focused node only
+    // reports where it is. Its bounds are scaled the way its graphicsLayer scales it.
+    val ringOwner = remember { Any() }
+    val ringShape = shape ?: RoundedCornerShape(cornerRadius)
+    val showsRing = isFocused && !hideFocusRing
+    val latestShowsRing by rememberUpdatedState(showsRing)
+    val latestRingShape by rememberUpdatedState(ringShape)
+    fun reportRing(unclipped: Rect) {
+        if (unclipped.width <= 0f || unclipped.height <= 0f) return
+        val c = unclipped.center
+        val halfW = unclipped.width * effectiveFocusScale / 2f
+        val halfH = unclipped.height * effectiveFocusScale / 2f
+        FocusRingRegistry.reportEngine(
+            FocusRingTarget(ringOwner, Rect(c.x - halfW, c.y - halfH, c.x + halfW, c.y + halfH), latestRingShape),
+        )
+    }
+    LaunchedEffect(showsRing, ringShape) {
+        if (showsRing) reportRing(latestUnclippedBounds) else FocusRingRegistry.clearEngine(ringOwner)
+    }
+    DisposableEffect(ringOwner) {
+        onDispose { FocusRingRegistry.clearEngine(ringOwner) }
+    }
+
     val scale by animateFloatAsState(
         targetValue = if (isFocused) effectiveFocusScale else 1f,
         animationSpec = tween(durationMillis = 150),
         label = "controller_focus_scale",
-    )
-
-    val sheenProgress by animateFloatAsState(
-        targetValue = if (isFocused && !hideFocusRing) 1f else 0f,
-        animationSpec = tween(durationMillis = 180),
-        label = "controller_focus_sheen",
     )
 
     this
@@ -2461,6 +2522,7 @@ fun Modifier.controllerFocusable(
                 latestUnclippedBounds = unclippedBounds
                 node.boundsInRoot = bounds
                 node.unclippedBoundsInRoot = unclippedBounds
+                if (latestShowsRing) reportRing(unclippedBounds)
                 if (effectiveEnabled) {
                     ControllerFocusEngine.upsertNode(node)
                 }
@@ -2474,172 +2536,6 @@ fun Modifier.controllerFocusable(
             }
             if (animatedAlpha != 1f) {
                 alpha = animatedAlpha
-            }
-        }
-        .drawWithContent {
-            drawContent()
-            if (sheenProgress > 0.01f) {
-                val sheenShape = shape ?: RoundedCornerShape(cornerRadius)
-                val sheenPath = Path().apply {
-                    addOutline(sheenShape.createOutline(size, layoutDirection, this@drawWithContent))
-                }
-                clipPath(sheenPath) {
-                    // Subtle artwork brightening + diagonal specular sheen on cover
-                    drawRect(
-                        color = Color.White.copy(alpha = 0.065f * sheenProgress),
-                    )
-                    drawRect(
-                        brush = Brush.linearGradient(
-                            colorStops = arrayOf(
-                                0.0f to Color.White.copy(alpha = 0.20f * sheenProgress),
-                                0.28f to Color.White.copy(alpha = 0.08f * sheenProgress),
-                                0.55f to Color.Transparent,
-                                1.0f to Color.White.copy(alpha = 0.04f * sheenProgress),
-                            ),
-                            start = Offset.Zero,
-                            end = Offset(size.width, size.height),
-                        ),
-                    )
-                }
-            }
-            if (isFocused && !hideFocusRing) {
-                if (useHaloFocusRing) {
-                    // Play Button Halo / High-Contrast Focus Ring:
-                    // Rendered strictly OUTSIDE the button perimeter so it never encroaches into the white button fill or icon:
-                    // 1. Dark separation ring (1.5px solid #090A10) right at the button boundary
-                    // 2. Crisp white outline (1.5px solid #FFFFFF) offset outward by 1.5px
-                    // 3. Diffused outer white glow (rgba(255, 255, 255, 0.55)) fading outward
-                    // 4. Outer subtle drop shadow
-                    val sepStrokePx = 1.5f.dp.toPx()
-                    val whiteStrokePx = 1.5f.dp.toPx()
-                    val glowStrokePx = 3.5f.dp.toPx()
-                    val shadowStrokePx = 5.dp.toPx()
-
-                    val outlineOffsetPx = 1.5f.dp.toPx()
-                    val glowOffsetPx = 3.dp.toPx()
-                    val shadowOffsetPx = 5.5f.dp.toPx()
-
-                    if (shape != null) {
-                        // 1. Boundary separation ring
-                        drawOutline(
-                            outline = shape.createOutline(size, layoutDirection, this),
-                            color = Color(0xFF090A10),
-                            style = Stroke(width = sepStrokePx),
-                        )
-                        // 2. White outline offset outward
-                        translate(left = -outlineOffsetPx, top = -outlineOffsetPx) {
-                            val expandedSize = Size(size.width + outlineOffsetPx * 2, size.height + outlineOffsetPx * 2)
-                            drawOutline(
-                                outline = shape.createOutline(expandedSize, layoutDirection, this),
-                                color = Color.White,
-                                style = Stroke(width = whiteStrokePx),
-                            )
-                        }
-                        // 3. Diffused white glow
-                        translate(left = -glowOffsetPx, top = -glowOffsetPx) {
-                            val expandedSize = Size(size.width + glowOffsetPx * 2, size.height + glowOffsetPx * 2)
-                            drawOutline(
-                                outline = shape.createOutline(expandedSize, layoutDirection, this),
-                                color = Color.White.copy(alpha = 0.55f),
-                                style = Stroke(width = glowStrokePx),
-                            )
-                        }
-                        // 4. Subtle outer shadow
-                        translate(left = -shadowOffsetPx, top = -shadowOffsetPx) {
-                            val expandedSize = Size(size.width + shadowOffsetPx * 2, size.height + shadowOffsetPx * 2)
-                            drawOutline(
-                                outline = shape.createOutline(expandedSize, layoutDirection, this),
-                                color = Color.Black.copy(alpha = 0.50f),
-                                style = Stroke(width = shadowStrokePx),
-                            )
-                        }
-                    } else {
-                        val radiusPx = cornerRadius.toPx()
-                        // 1. Boundary separation ring
-                        drawRoundRect(
-                            color = Color(0xFF090A10),
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = CornerRadius(radiusPx, radiusPx),
-                            style = Stroke(width = sepStrokePx),
-                        )
-                        // 2. White outline offset outward
-                        drawRoundRect(
-                            color = Color.White,
-                            topLeft = Offset(-outlineOffsetPx, -outlineOffsetPx),
-                            size = Size(size.width + outlineOffsetPx * 2, size.height + outlineOffsetPx * 2),
-                            cornerRadius = CornerRadius(radiusPx + outlineOffsetPx, radiusPx + outlineOffsetPx),
-                            style = Stroke(width = whiteStrokePx),
-                        )
-                        // 3. Diffused white glow
-                        drawRoundRect(
-                            color = Color.White.copy(alpha = 0.55f),
-                            topLeft = Offset(-glowOffsetPx, -glowOffsetPx),
-                            size = Size(size.width + glowOffsetPx * 2, size.height + glowOffsetPx * 2),
-                            cornerRadius = CornerRadius(radiusPx + glowOffsetPx, radiusPx + glowOffsetPx),
-                            style = Stroke(width = glowStrokePx),
-                        )
-                        // 4. Subtle outer shadow
-                        drawRoundRect(
-                            color = Color.Black.copy(alpha = 0.50f),
-                            topLeft = Offset(-shadowOffsetPx, -shadowOffsetPx),
-                            size = Size(size.width + shadowOffsetPx * 2, size.height + shadowOffsetPx * 2),
-                            cornerRadius = CornerRadius(radiusPx + shadowOffsetPx, radiusPx + shadowOffsetPx),
-                            style = Stroke(width = shadowStrokePx),
-                        )
-                    }
-                } else {
-                    // Subtle Modern Focus Ring across all cards/elements:
-                    // 1. Subtle drop shadow
-                    // 2. Soft diffused white glow (rgba(255, 255, 255, 0.45))
-                    // 3. Sleek thinner 1.6dp white primary border
-                    val shadowStrokePx = 5.dp.toPx()
-                    val glowStrokePx = 3.5f.dp.toPx()
-                    val whiteBorderStrokePx = 1.6f.dp.toPx()
-
-                    if (shape != null) {
-                        val outline = shape.createOutline(size, layoutDirection, this)
-                        drawOutline(
-                            outline = outline,
-                            color = Color.Black.copy(alpha = 0.50f),
-                            style = Stroke(width = shadowStrokePx),
-                        )
-                        drawOutline(
-                            outline = outline,
-                            color = Color.White.copy(alpha = 0.45f),
-                            style = Stroke(width = glowStrokePx),
-                        )
-                        drawOutline(
-                            outline = outline,
-                            color = Color.White,
-                            style = Stroke(width = whiteBorderStrokePx),
-                        )
-                    } else {
-                        val radiusPx = cornerRadius.toPx()
-                        val cr = CornerRadius(radiusPx, radiusPx)
-                        drawRoundRect(
-                            color = Color.Black.copy(alpha = 0.50f),
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = cr,
-                            style = Stroke(width = shadowStrokePx),
-                        )
-                        drawRoundRect(
-                            color = Color.White.copy(alpha = 0.45f),
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = cr,
-                            style = Stroke(width = glowStrokePx),
-                        )
-                        drawRoundRect(
-                            color = Color.White,
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = cr,
-                            style = Stroke(width = whiteBorderStrokePx),
-                        )
-                    }
-                }
             }
         }
 }

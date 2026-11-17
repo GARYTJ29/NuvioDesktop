@@ -2,10 +2,21 @@
 REM ---------------------------------------------------------------------------
 REM Builds Nuvio Desktop for Windows and produces dist\NuvioDesktop\NuvioDesktop.exe
 REM
-REM Usage:  scripts\build.bat [release] [clean] [msi]
+REM Usage:  scripts\build.bat [release] [clean] [msi] [safe]
 REM   release  use createReleaseDistributable instead of createDistributable
 REM   clean    run :composeApp:clean first (forces a full rebuild)
 REM   msi      also build the MSI installer (needs WiX Toolset 3.x on PATH)
+REM   safe     disable fast incremental Kotlin compilation (see below)
+REM
+REM Fast incremental compilation: by default Kotlin 2.x throws away incremental
+REM state and recompiles the whole module (~300k lines, ~90s) whenever a file
+REM in a shared source set (commonMain, fullCommonMain, ...) changes - see
+REM KT-62686. Dev builds opt in to Kotlin's incremental optimizations for
+REM multiplatform, so a one-line edit recompiles only the affected files (~1s).
+REM The upstream rebuild exists because expect/actual edits can in rare cases
+REM compile incrementally to a stale result. If a build behaves strangely after
+REM changing an expect/actual declaration, rerun with "clean". Release builds
+REM always use the safe mode.
 REM
 REM Requirements (see scripts\README-build.md):
 REM   - JDK 17+ (JAVA_HOME or java on PATH)
@@ -22,15 +33,20 @@ set "TASK=createDistributable"
 set "RELEASE_DIR=main"
 set "DO_CLEAN=0"
 set "DO_MSI=0"
+set "FAST_IC=1"
 
 :parse
 if "%~1"=="" goto parsed
-if /i "%~1"=="release" (set "TASK=createReleaseDistributable" & set "RELEASE_DIR=main-release")
+if /i "%~1"=="release" (set "TASK=createReleaseDistributable" & set "RELEASE_DIR=main-release" & set "FAST_IC=0")
 if /i "%~1"=="clean" set "DO_CLEAN=1"
 if /i "%~1"=="msi" set "DO_MSI=1"
+if /i "%~1"=="safe" set "FAST_IC=0"
 shift
 goto parse
 :parsed
+
+set "GRADLE_ARGS="
+if "%FAST_IC%"=="1" set "GRADLE_ARGS=-Pkotlin.internal.incremental.enableUnsafeOptimizationsForMultiplatform=true"
 
 REM --- Java check -------------------------------------------------------------
 if defined JAVA_HOME (
@@ -63,13 +79,14 @@ if not defined NUVIO_SUPABASE_URL (
 )
 
 REM --- Gradle build -----------------------------------------------------------
-if "%DO_CLEAN%"=="1" (
-    echo [build] Cleaning...
-    call "%ROOT%\gradlew.bat" :composeApp:clean || goto :fail
-)
+REM clean runs in the same Gradle invocation, which saves a second
+REM daemon/configuration round trip.
+set "TASKS=:composeApp:%TASK%"
+if "%DO_CLEAN%"=="1" set "TASKS=:composeApp:clean %TASKS%"
 
-echo [build] Running :composeApp:%TASK% ...
-call "%ROOT%\gradlew.bat" :composeApp:%TASK% || goto :fail
+if "%FAST_IC%"=="1" (echo [build] Fast incremental Kotlin compilation: on) else (echo [build] Fast incremental Kotlin compilation: off)
+echo [build] Running %TASKS% ...
+call "%ROOT%\gradlew.bat" %TASKS% %GRADLE_ARGS% || goto :fail
 
 set "APP_SRC=%ROOT%\composeApp\build\compose\binaries\%RELEASE_DIR%\app\Nuvio"
 if not exist "%APP_SRC%\Nuvio.exe" (
@@ -102,7 +119,7 @@ REM --- Optional MSI -----------------------------------------------------------
 if "%DO_MSI%"=="1" (
     if /i "%TASK%"=="createReleaseDistributable" (set "MSI_TASK=packageReleaseMsi") else (set "MSI_TASK=packageMsi")
     echo [build] Running :composeApp:%MSI_TASK% ...
-    call "%ROOT%\gradlew.bat" :composeApp:%MSI_TASK% || goto :fail
+    call "%ROOT%\gradlew.bat" :composeApp:%MSI_TASK% %GRADLE_ARGS% || goto :fail
 )
 
 echo.

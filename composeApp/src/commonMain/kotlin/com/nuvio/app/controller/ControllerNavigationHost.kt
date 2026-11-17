@@ -129,6 +129,7 @@ fun ControllerNavigationHost(
 @Composable
 fun BoxScope.ControllerMainOverlay(currentRoute: AppRoute?) {
     if (currentRoute !is PlayerRoute) {
+        FocusRingOverlay()
         ControllerHintToolbar(
             modifier = Modifier
                 .align(Alignment.BottomEnd)

@@ -199,7 +199,21 @@ object ControllerManager {
         _screenContext.value = updater(_screenContext.value)
     }
 
+    /**
+     * Sees every controller event before the spatial engine; returns true to consume it.
+     * Platform features that own input outright (desktop power menu, on-screen keyboard,
+     * native player controls) install it.
+     */
+    @Volatile
+    var inputInterceptor: ((ControllerEvent) -> Boolean)? = null
+
     fun dispatchEvent(event: ControllerEvent) {
+        if (inputInterceptor?.invoke(event) == true) return
+        dispatchToEngine(event)
+    }
+
+    /** Dispatches past [inputInterceptor], for events it held back and now releases. */
+    fun dispatchToEngine(event: ControllerEvent) {
         val wokeUp = notifyControllerInput()
         if (wokeUp && event is ControllerEvent.Navigate && !ControllerFocusEngine.deferNavigationToCompose) {
             // First movement both wakes the app into controller mode and selects the initial item,
