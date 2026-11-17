@@ -95,11 +95,6 @@ struct Player {
     int snapResets = 0;         // consecutive watchdog resets without a snapshot
     int snapStill = 0;          // consecutive snapshots identical to the last pushed one
     int snapSkip = 0;           // composite ticks left before the next request while still
-    long lastUiPos = -1;
-    long lastUiBuf = -1;
-    long lastUiVol = -1;
-    bool lastUiPaused = false;
-    bool lastUiLoading = false;
     bool overlayDirtyReported = false;
     std::string lastUpdateJs;
     // Controls-state payload buffering (macOS/Windows parity): the first
@@ -645,34 +640,6 @@ void presentOverlaySurface(Player *player, cairo_surface_t *surf) {
 // single window (XWayland won't alpha-blend sibling windows; mpv does the compose
 // that Core Animation / DWM do on macOS / Windows). Only runs while the chrome is
 // visible (plus a short fade-out grace) so normal watching pays nothing.
-bool drawOverlaySurface(Player *player) {
-    if (!player->webview || !player->gtkWindow || !player->overlayXid) return false;
-    GtkWidget *view = GTK_WIDGET(player->webview);
-    GdkWindow *ovGw = gtk_widget_get_window(player->gtkWindow);
-    if (!ovGw || !gtk_widget_get_realized(view)) return false;
-    XWindowAttributes wa;
-    if (!XGetWindowAttributes(GDK_WINDOW_XDISPLAY(ovGw), player->overlayXid, &wa) ||
-        wa.width <= 0 || wa.height <= 0) {
-        return false;
-    }
-    int scale = gdk_window_get_scale_factor(ovGw);
-    if (scale < 1) scale = 1;
-    GtkAllocation alloc;
-    gtk_widget_get_allocation(view, &alloc);
-    if (alloc.width * scale != wa.width || alloc.height * scale != wa.height) return true;
-    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, wa.width, wa.height);
-    if (cairo_surface_status(surf) != CAIRO_STATUS_SUCCESS) {
-        cairo_surface_destroy(surf);
-        return false;
-    }
-    cairo_surface_set_device_scale(surf, scale, scale);
-    cairo_t *cr = cairo_create(surf);
-    gtk_widget_draw(view, cr);
-    cairo_destroy(cr);
-    presentOverlaySurface(player, surf);
-    return true;
-}
-
 void compositeOverlay(Player *player) {
     if (!player->overlayXid || !player->mpv || !player->gtkWindow) return;
     GdkWindow *gw = gtk_widget_get_window(player->gtkWindow);
@@ -761,7 +728,7 @@ void compositeOverlay(Player *player) {
             player->snapCooldownTicks--;
         } else if (player->snapSkip > 0) {
             player->snapSkip--;
-        } else if (!drawOverlaySurface(player)) {
+        } else {
             player->snapInFlight = true;
             player->snapWaitTicks = 0;
             if (!player->snapCancel) player->snapCancel = g_cancellable_new();
@@ -955,18 +922,6 @@ gboolean pushPlayerUpdate(gpointer data) {
     volumeLevel = std::max(0.0, std::min(kMaxVolumePercent / 100.0, volumeLevel));
     bool paused = mpvGetFlag(player->mpv, "pause");
     bool loading = playerLoading(player);
-    long posSec = (long)position;
-    long bufSec = (long)bufferedPosition;
-    long vol = (long)(volumeLevel * 1000);
-    if (posSec != player->lastUiPos || bufSec != player->lastUiBuf || vol != player->lastUiVol ||
-        paused != player->lastUiPaused || loading != player->lastUiLoading) {
-        player->lastUiPos = posSec;
-        player->lastUiBuf = bufSec;
-        player->lastUiVol = vol;
-        player->lastUiPaused = paused;
-        player->lastUiLoading = loading;
-        if (!player->overlayDirtyReported) wakeSnapshots(player);
-    }
     std::string audioTracks = buildTracksJson(player->mpv, "audio");
     std::string subtitleTracks = buildTracksJson(player->mpv, "sub");
     char head[224];
@@ -1646,7 +1601,7 @@ JNIEXPORT jlong JNICALL NP(create)(
     JNIEnv *env, jobject /*thiz*/, jlong hostViewPtr, jstring sourceUrl,
     jobjectArray headerLines, jboolean playWhenReady, jlong initialPositionMs,
     jstring controlsPageUrl, jint decoderPriority,
-    jboolean /*nvidiaRtxSuperResolutionEnabled*/, jobject eventSink) {
+    jboolean /*nvidiaRtxSuperResolutionEnabled*/, jboolean /*nvidiaRtxHdrEnabled*/, jobject eventSink) {
 
     // libmpv requires LC_NUMERIC=C (e.g. non-"C" locales with comma
     // decimals make mpv_create fail); the JVM uses java.util.Locale, so
@@ -1876,11 +1831,13 @@ JNIEXPORT void JNICALL NP(seekTo)(JNIEnv *, jobject, jlong handle, jlong positio
     p->ended.store(false);
 }
 
+// Exact: mpv keeps relative seeks on keyframes by default, which can overshoot by
+// up to one GOP (often ~10 s).
 JNIEXPORT void JNICALL NP(seekBy)(JNIEnv *, jobject, jlong handle, jlong offsetMs) {
     Player *p = asPlayer(handle);
     if (!p) return;
     std::string delta = std::to_string(offsetMs / 1000.0);
-    const char *cmd[] = {"seek", delta.c_str(), "relative", nullptr};
+    const char *cmd[] = {"seek", delta.c_str(), "relative+exact", nullptr};
     mpv_command(p->mpv, cmd);
     p->ended.store(false);
 }
