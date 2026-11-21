@@ -23,6 +23,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.gestures.stopScroll
 import androidx.compose.runtime.derivedStateOf
@@ -39,9 +40,11 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nuvio.app.core.input.AppNavigationBridge
 import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.NuvioInputField
@@ -103,6 +106,19 @@ fun SearchScreen(
 ) {
     val focusRequester = remember { FocusRequester() }
     var isSearchFocused by remember { mutableStateOf(false) }
+    var isRecentFocused by remember { mutableStateOf(false) }
+
+    // Capturing focus keeps a mouse click (on a recent search, or clearing the
+    // field) from pulling focus off the field. It also pins the focus there for
+    // the controller's d-pad, so the field is never captured while a pad is
+    // driving: the pad moves focus on purpose.
+    val directionalInput by AppNavigationBridge.isDirectionalInputActive.collectAsState()
+    fun captureSearchFocus() {
+        if (!AppNavigationBridge.isDirectionalInputActive.value) focusRequester.captureFocus()
+    }
+    LaunchedEffect(directionalInput) {
+        if (directionalInput) focusRequester.freeFocus()
+    }
 
     ScreenActivityEffect(listState) { screenActive ->
         if (!screenActive) {
@@ -285,16 +301,17 @@ fun SearchScreen(
                         NuvioInputField(
                             value = query,
                             onValueChange = {
-                                focusRequester.captureFocus()
+                                captureSearchFocus()
                                 query = it
                             },
                             placeholder = stringResource(Res.string.compose_search_placeholder),
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(textDirection = TextDirection.Content),
                             shape = RoundedCornerShape(NuvioTokens.Radius.xl),
                             modifier = Modifier
                                 .focusRequester(focusRequester)
                                 .onFocusChanged {
                                     isSearchFocused = it.isFocused
-                                    if (query.isNotBlank()) focusRequester.captureFocus()
+                                    if (query.isNotBlank()) captureSearchFocus()
                                 },
                             trailingContent = if (query.isNotBlank()) {
                                 {
@@ -317,13 +334,19 @@ fun SearchScreen(
         }
 
         if (query.isBlank()) {
-            if (isSearchFocused && recentSearches.isNotEmpty()) {
-                focusRequester.captureFocus()
+            // The list stays up while the pad has moved focus down into it.
+            if ((isSearchFocused || isRecentFocused) && recentSearches.isNotEmpty()) {
+                captureSearchFocus()
                 item(key = "recent_searches") {
                     SearchRecentSection(
                         recentSearches = recentSearches,
-                        onSearchPress = { recentQuery -> query = recentQuery },
+                        onSearchPress = { recentQuery ->
+                            query = recentQuery
+                            // Back to the field, so the d-pad goes on to the results.
+                            focusRequester.requestFocus()
+                        },
                         onRemoveSearch = SearchHistoryRepository::removeSearch,
+                        modifier = Modifier.onFocusChanged { isRecentFocused = it.hasFocus },
                     )
                 }
             }
@@ -514,7 +537,7 @@ private fun SearchRecentSection(
 }
 
 @Composable
-private fun SearchRecentRow(
+internal fun SearchRecentRow(
     query: String,
     onSearchPress: () -> Unit,
     onRemovePress: () -> Unit,
@@ -536,7 +559,7 @@ private fun SearchRecentRow(
         Text(
             text = query,
             modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyLarge.copy(textDirection = TextDirection.Content),
             color = MaterialTheme.colorScheme.onBackground,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

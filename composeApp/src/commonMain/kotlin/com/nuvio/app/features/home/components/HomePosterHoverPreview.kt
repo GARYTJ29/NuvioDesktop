@@ -14,7 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,6 +52,7 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
@@ -78,6 +79,7 @@ import com.nuvio.app.core.ui.PosterZoomOverlayCoordinator
 import com.nuvio.app.core.ui.nuvio
 import com.nuvio.app.core.ui.rememberPosterCardStyleUiState
 import com.nuvio.app.core.ui.secondaryClick
+import com.nuvio.app.core.ui.platformTouchScroll
 import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.details.components.DetailIconAction
 import com.nuvio.app.features.library.LibraryRepository
@@ -139,8 +141,8 @@ internal fun HomePosterHoverPreview(
 
     val anchorInteractionSource = remember { MutableInteractionSource() }
     val previewInteractionSource = remember { MutableInteractionSource() }
-    val anchorHovered by anchorInteractionSource.collectIsHoveredAsState()
-    val previewHovered by previewInteractionSource.collectIsHoveredAsState()
+    val anchorHovered by anchorInteractionSource.collectIsPointerHoveredAsState()
+    val previewHovered by previewInteractionSource.collectIsPointerHoveredAsState()
     var previewVisible by remember(item.type, item.id) { mutableStateOf(false) }
     var popupMounted by remember(item.type, item.id) { mutableStateOf(false) }
     var previewDismissedByScroll by remember(item.type, item.id) { mutableStateOf(false) }
@@ -325,6 +327,7 @@ internal fun HomePosterHoverPreview(
                         trailerStartSeconds = posterCardStyle.hoverPreviewTrailerStartSeconds,
                         trailerPlaybackSource = trailerPlaybackSource,
                         modifier = Modifier
+                            .platformTouchScroll()
                             .hoverable(previewInteractionSource)
                             .onPointerEvent(PointerEventType.Scroll) {
                                 previewDismissedByScroll = true
@@ -373,6 +376,7 @@ private fun HomePosterPreviewCard(
 
     Column(
         modifier = modifier
+            .focusProperties { canFocus = false }
             .width(HoverPreviewWidth)
             .shadow(tokens.elevation.overlay, shape)
             .clip(shape)

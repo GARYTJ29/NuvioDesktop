@@ -115,6 +115,7 @@ internal fun LazyListScope.advancedSettingsContent(
             }
         }
     }
+    platformAdvancedSettingsContent(isTablet = isTablet)
     if (SentrySettingsRepository.isSupported) {
         item {
             val sentryEnabledFlow = remember {

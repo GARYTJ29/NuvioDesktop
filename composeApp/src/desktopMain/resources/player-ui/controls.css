@@ -1377,6 +1377,10 @@ button:disabled {
   transition: opacity 180ms ease;
 }
 
+.opening-overlay[hidden] {
+  display: none;
+}
+
 .opening-overlay.visible {
   opacity: 1;
   pointer-events: auto;
@@ -1620,7 +1624,7 @@ button:disabled {
   background:
     var(--theme-accent-gradient, linear-gradient(var(--theme-timeline-fill), var(--theme-timeline-fill)))
       left center / var(--progress, 0%) 100% no-repeat,
-    linear-gradient(var(--theme-buffering-track)) left center / var(--bufferProgress, 0%) 100% no-repeat,
+    linear-gradient(var(--theme-buffering-track), var(--theme-buffering-track)) left center / var(--bufferProgress, 0%) 100% no-repeat,
     var(--theme-timeline-track);
 }
 
@@ -3760,4 +3764,14 @@ svg {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Controller focus ring (gamepad.js). Programmatic focus does not always count
+   as :focus-visible, so while a pad is driving the overlay any focus shows. */
+html.gamepad-active .modal-layer button:focus,
+html.gamepad-active .modal-layer input:focus,
+html.gamepad-active .modal-layer [tabindex]:focus,
+html.gamepad-active .action.focused {
+  outline: 3px solid rgba(255, 255, 255, 0.95);
+  outline-offset: -2px;
 }

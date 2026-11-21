@@ -698,10 +698,17 @@ val linuxPlayerBridgeOutput = layout.buildDirectory.file("native/linux/libplayer
 val linuxPlayerBridgeJavaHome = providers.systemProperty("java.home").get()
 val linuxPlayerBridgeSourceFile = linuxPlayerBridgeSource.asFile
 val linuxPlayerBridgeOutputFile = linuxPlayerBridgeOutput.get().asFile
+// Keep the distributed bridge compatible with x86-64 CPUs without AVX.
+val linuxPlayerBridgeCpuFlags = if (isLinuxHost && normalizedLinuxArch(System.getProperty("os.arch")) == "x86_64") {
+    "-march=x86-64 -mtune=generic"
+} else {
+    ""
+}
 val buildLinuxPlayerBridge = tasks.register<Exec>("buildLinuxPlayerBridge") {
     notCompatibleWithConfigurationCache("Builds a host-local player bridge against system libmpv.")
     enabled = isLinuxHost
     inputs.file(linuxPlayerBridgeSourceFile)
+    inputs.property("cpuFlags", linuxPlayerBridgeCpuFlags)
     outputs.file(linuxPlayerBridgeOutputFile)
     val src = linuxPlayerBridgeSourceFile.absolutePath
     val out = linuxPlayerBridgeOutputFile.absolutePath
@@ -713,6 +720,7 @@ val buildLinuxPlayerBridge = tasks.register<Exec>("buildLinuxPlayerBridge") {
         "c++ -std=c++17 -shared -fPIC -O2 " +
             "-I'$jni' -I'$jni/linux' " +
             "$(pkg-config --cflags mpv webkit2gtk-4.1 gtk+-3.0 x11 xcomposite xext) " +
+            "$linuxPlayerBridgeCpuFlags " +
             "'$src' -o '$out' " +
             "$(pkg-config --libs mpv webkit2gtk-4.1 gtk+-3.0 x11 xcomposite xext) -lpthread",
     )
@@ -876,8 +884,11 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
         powershellCommand,
     )
 }
+// Up-to-date checks on the declared inputs/outputs decide when this reruns, so
+// an edit to player_bridge.cpp rebuilds the DLL without a clean build. Keep the
+// task free of script references: one would make Gradle discard the
+// configuration cache on every build.
 val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") {
-    notCompatibleWithConfigurationCache("Builds a host-local player bridge against WebView2 and libmpv for Windows.")
     enabled = isWindowsHost
     inputs.file(windowsPlayerBridgeSource)
     if (windowsWebView2IncludeDir.exists()) {
@@ -889,7 +900,6 @@ val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") 
     outputs.file(windowsPlayerBridgeOutput)
     outputs.file(windowsPlayerBridgeImportLib)
     outputs.file(windowsPlayerBridgePdb)
-    onlyIf { !windowsPlayerBridgeOutput.get().asFile.exists() }
     commandLine(windowsPlayerBridgeCommand)
 }
 
@@ -911,6 +921,12 @@ val prepareWindowsPlayerRuntime = tasks.register<Sync>("prepareWindowsPlayerRunt
         windowsLibmpvDll?.exists() == true -> {
             from(windowsLibmpvDll)
         }
+    }
+    // Seek-bar hover thumbnails: forked thumbfast.lua (loaded into libmpv) plus the
+    // standalone mpv.exe it spawns to decode frames. Kept flat next to libmpv so the
+    // runtime index and local-build copy pick them up unchanged.
+    from(layout.projectDirectory.dir("src/desktopMain/native/windows/thumbfast")) {
+        include("thumbfast.lua", "mpv.exe")
     }
 }
 
@@ -959,19 +975,28 @@ val prepareMacosPlayerAppResources = tasks.register<Sync>("prepareMacosPlayerApp
     into(macosPlayerAppResourcesRoot.map { it.dir("macos/native/macos") })
 }
 
-tasks.withType<Jar>().configureEach {
-    if (isWindowsHost && name == "desktopJar") {
-        dependsOn(buildWindowsPlayerBridge, prepareWindowsPlayerRuntime, generateWindowsPlayerRuntimeIndex)
-        from(windowsPlayerBridgeOutput) {
-            into("native/windows")
-        }
-        from(windowsPlayerRuntimeOutput) {
-            into("native/windows")
-        }
-        from(layout.projectDirectory.file("src/desktopMain/native/windows/engine/nuvio_engine.dll")) {
-            into("native/windows")
-        }
+// The Windows player natives (~240MB: libmpv, mpv.exe, the engine, the bridge)
+// live in their own jar on the desktop runtime classpath rather than in
+// desktopJar. They are still found as /native/windows/* classpath resources,
+// but a Kotlin-only change no longer recompresses them: this jar rebuilds only
+// when a native file changes.
+val desktopWindowsNativesJar = tasks.register<Jar>("desktopWindowsNativesJar") {
+    enabled = isWindowsHost
+    dependsOn(buildWindowsPlayerBridge, prepareWindowsPlayerRuntime, generateWindowsPlayerRuntimeIndex)
+    archiveFileName.set("nuvio-windows-natives.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("native/windows-jar"))
+    from(windowsPlayerBridgeOutput) {
+        into("native/windows")
     }
+    from(windowsPlayerRuntimeOutput) {
+        into("native/windows")
+    }
+    from(layout.projectDirectory.file("src/desktopMain/native/windows/engine/nuvio_engine.dll")) {
+        into("native/windows")
+    }
+}
+
+tasks.withType<Jar>().configureEach {
     if (isLinuxHost && name == "desktopJar") {
         dependsOn(buildLinuxPlayerBridge)
         from(linuxPlayerBridgeOutput) {
@@ -1019,6 +1044,10 @@ if (isWindowsHost) {
 
 tasks.withType<KotlinCompilationTask<*>>().configureEach {
     dependsOn(generateRuntimeConfigs)
+}
+
+tasks.withType<org.gradle.api.tasks.testing.Test>().matching { it.name == "desktopTest" }.configureEach {
+    jvmArgs("--add-opens=java.desktop/java.awt.event=ALL-UNNAMED")
 }
 
 kotlin {
@@ -1188,6 +1217,9 @@ kotlin {
                 implementation(libs.sentry.jvm)
                 implementation(libs.jna)
                 implementation(files("libs/nuvio-engine-jvm-0.1.6.jar"))
+                if (isWindowsHost) {
+                    runtimeOnly(files(desktopWindowsNativesJar))
+                }
             }
         }
         val androidHostTest by getting {
@@ -1271,6 +1303,7 @@ compose.desktop {
             // bridge owns the process's GTK via initGtkEarly (skoruppa's fix).
             "-Djdk.gtk.version=0",
             "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
+            "--add-opens=java.desktop/java.awt.event=ALL-UNNAMED",
             "--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED",
             "--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED",
             "--add-opens=java.desktop/sun.awt.windows=ALL-UNNAMED",
@@ -1700,4 +1733,12 @@ configurations.all {
     exclude(group = "androidx.media3", module = "media3-datasource")
     exclude(group = "androidx.media3", module = "media3-datasource-okhttp")
     exclude(group = "androidx.media3", module = "media3-extractor")
+}
+
+composeCompiler {
+    stabilityConfigurationFiles.add(project.layout.projectDirectory.file("compose_stability_config.conf"))
+    if (providers.gradleProperty("composeCompilerReports").orNull == "true") {
+        metricsDestination = layout.buildDirectory.dir("compose_metrics")
+        reportsDestination = layout.buildDirectory.dir("compose_reports")
+    }
 }

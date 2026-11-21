@@ -50,6 +50,8 @@ namespace {
 
 JavaVM *gVm = nullptr;
 constexpr double kMaxVolumePercent = 200.0;
+constexpr uint64_t kOverlayReplyTag = 0x6f766c79;  // 'ovly': overlay-add reply_userdata (high 32 bits)
+constexpr int kDirtyReportedSnapSkipTicks = 90;
 
 struct Player {
     mpv_handle *mpv = nullptr;
@@ -82,6 +84,15 @@ struct Player {
     cairo_surface_t *snapSurf = nullptr;      // buffer mpv's overlay points at
     cairo_surface_t *snapSurfPrev = nullptr;  // kept one push longer: mpv may
                                               // still sample it mid-frame
+    // overlay-add is issued async: a synchronous mpv_command blocks the GTK thread
+    // ~3.5ms per frame waiting on the busy playback core. mpv copies the pixels
+    // when the command EXECUTES, so a surface must not be freed while an add that
+    // points at it is still queued. Adds carry a sequence number, the event loop
+    // records completions, and overlayBarrier() (a synchronous no-op; mpv runs
+    // commands in order) drains the queue before any surface is freed.
+    std::atomic<uint64_t> overlaySeqIssued{0};
+    std::atomic<uint64_t> overlaySeqDone{0};
+    int64_t overlayAsyncAt = 0;
     bool snapInFlight = false;
     int snapWaitTicks = 0;  // watchdog: ticks spent waiting on the in-flight snapshot
     // Snapshot requests are generation-stamped: a watchdog reset (or teardown)
@@ -94,11 +105,8 @@ struct Player {
     int snapResets = 0;         // consecutive watchdog resets without a snapshot
     int snapStill = 0;          // consecutive snapshots identical to the last pushed one
     int snapSkip = 0;           // composite ticks left before the next request while still
-    long lastUiPos = -1;
-    long lastUiBuf = -1;
-    long lastUiVol = -1;
-    bool lastUiPaused = false;
-    bool lastUiLoading = false;
+    bool overlayDirtyReported = false;
+    std::string lastUpdateJs;
     // Controls-state payload buffering (macOS/Windows parity): the first
     // updateControls arrives before the page defines window.playerControls, so a
     // fire-and-forget eval loses it and the loading screen shows a bare spinner
@@ -220,6 +228,34 @@ void gtkSync(std::function<void()> fn) {
     g_main_context_invoke(nullptr, syncTrampoline, &s);
     std::unique_lock<std::mutex> lock(s.m);
     s.cv.wait(lock, [&] { return s.done; });
+}
+
+// ---- X error handler -----------------------------------------------------
+// libmpv's X11 VO resets the process-wide X error handler to NULL (Xlib's
+// default, which exits on any X error) when it shuts down. Put the app's
+// handler back after each mpv instance is destroyed. Both steps run on the
+// GTK thread so a GDK error trap can't capture or undo the change.
+
+XErrorHandler gAppXErrorHandler = nullptr;
+std::once_flag gAppXErrorHandlerOnce;
+
+int ignoreXError(Display *, XErrorEvent *) { return 0; }
+
+void rememberAppXErrorHandler() {
+    std::call_once(gAppXErrorHandlerOnce, [] {
+        ensureGtk();
+        gtkSync([] {
+            // Xlib has no getter: swap in a no-op handler to read the current one.
+            XErrorHandler current = XSetErrorHandler(ignoreXError);
+            XSetErrorHandler(current);
+            gAppXErrorHandler = current;
+        });
+    });
+}
+
+void restoreAppXErrorHandler() {
+    if (!gAppXErrorHandler) return;
+    gtkSync([] { XSetErrorHandler(gAppXErrorHandler); });
 }
 
 // ---- small helpers -------------------------------------------------------
@@ -375,6 +411,7 @@ void wakeSnapshots(Player *player) {
 
 void flushControlsJson(Player *player) {
     wakeSnapshots(player);
+    player->lastUpdateJs.clear();
     if (!player->webview || player->pendingControlsJson.empty()) return;
     std::string script =
         "(function(){if(!window.playerControls)return 'missing';"
@@ -409,6 +446,20 @@ void setOverlayCursorHidden(Player *player, bool hidden) {
     NUVIO_LOG("overlay cursor %s", hidden ? "hidden" : "shown");
 }
 
+// Top-level ancestor of w (the root's direct child containing it), or 0 if w
+// is gone. Caller must hold an X error trap: w may belong to another client.
+Window x11ToplevelOf(Display *dpy, Window w) {
+    while (w) {
+        Window root = 0, parent = 0, *kids = nullptr;
+        unsigned int nkids = 0;
+        if (!XQueryTree(dpy, w, &root, &parent, &kids, &nkids)) return 0;
+        if (kids) XFree(kids);
+        if (parent == root || parent == 0) return w;
+        w = parent;
+    }
+    return 0;
+}
+
 // Give the overlay window real X input focus so the page's keydown handlers
 // run — the same position WKWebView (first responder) and WebView2 (SetFocus/
 // MoveFocus) hold on macOS/Windows. The overlay is composite-redirected but
@@ -419,20 +470,38 @@ void focusOverlay(Player *player) {
     GdkWindow *gw = gtk_widget_get_window(player->gtkWindow);
     if (!gw) return;
     Display *dpy = GDK_WINDOW_XDISPLAY(gw);
-    // Remember the previous focus owner (normally the AWT toplevel) so
-    // teardown can hand the keyboard back. Only on the first grab: re-grabs
-    // (fullscreen toggles, window refocus) must not save our own overlay.
-    if (!player->savedFocusXid) {
-        Window cur = 0;
-        int revert = 0;
-        XGetInputFocus(dpy, &cur, &revert);
-        if (cur != player->overlayXid && cur != None && cur != PointerRoot) {
-            player->savedFocusXid = cur;
+    GdkDisplay *gdpy = gdk_window_get_display(gw);
+    // Only move the keyboard within Nuvio, never take it from another app.
+    // XSetInputFocus bypasses the window manager, so on XWayland the
+    // compositor keeps showing the other app (e.g. a game on another monitor)
+    // as active while its keypresses land here (#729). This runs on every
+    // overlay creation, i.e. each new playback and auto-next episode, so only
+    // grab when X focus is already inside the Nuvio toplevel hosting the
+    // player. None/PointerRoot (e.g. a Wayland-native app is focused) count as
+    // "not ours". If skipped, the window focus listener re-grants focus once
+    // the user activates Nuvio.
+    Window cur = 0;
+    int revert = 0;
+    XGetInputFocus(dpy, &cur, &revert);
+    if (cur != player->overlayXid) {
+        bool ours = false;
+        if (cur != None && cur != PointerRoot) {
+            gdk_x11_display_error_trap_push(gdpy);
+            Window focusTop = x11ToplevelOf(dpy, cur);
+            ours = focusTop && focusTop == x11ToplevelOf(dpy, player->hostXid);
+            gdk_x11_display_error_trap_pop_ignored(gdpy);
         }
+        if (!ours) {
+            NUVIO_LOG("input focus 0x%lx is outside Nuvio; not grabbing", cur);
+            return;
+        }
+        // Remember the previous focus owner (normally the AWT toplevel) so
+        // teardown can hand the keyboard back. Only on the first grab:
+        // re-grabs (fullscreen toggles, window refocus) keep the original.
+        if (!player->savedFocusXid) player->savedFocusXid = cur;
     }
     // Route GTK-side key delivery to the webkit widget once the X events arrive.
     if (player->webview) gtk_widget_grab_focus(GTK_WIDGET(player->webview));
-    GdkDisplay *gdpy = gdk_window_get_display(gw);
     gdk_x11_display_error_trap_push(gdpy);
     XSetInputFocus(dpy, player->overlayXid, RevertToParent, CurrentTime);
     XFlush(dpy);
@@ -464,6 +533,7 @@ void onPlayerMessage(WebKitUserContentManager *, WebKitJavascriptResult *js, gpo
     // it is up. cursorActivity also arrives while hidden (mouse woke the UI) and
     // must re-activate compositing so the fade-in is actually shown.
     if (type) wakeSnapshots(player);
+    if (type) player->lastUpdateJs.clear();
     if (type) {
         if (strcmp(type, "setPlaybackState") == 0 ||
             strcmp(type, "setPlaybackStateQuiet") == 0) {
@@ -508,6 +578,13 @@ void onPlayerMessage(WebKitUserContentManager *, WebKitJavascriptResult *js, gpo
     if (valV) g_object_unref(valV);
 }
 
+void onOverlayDirty(WebKitUserContentManager *, WebKitJavascriptResult *, gpointer data) {
+    auto *player = static_cast<Player *>(data);
+    if (!playerAlive(player)) return;
+    player->overlayDirtyReported = true;
+    wakeSnapshots(player);
+}
+
 // The overlay toplevel is a child of the AWT canvas at the X level, and player
 // close races Compose's canvas teardown against dispose(): when AWT destroys
 // the canvas first, X cascade-destroys the overlay's window, GDK reports it
@@ -525,7 +602,26 @@ void onOverlayDestroyed(GtkWidget *, gpointer data) {
 
 // Free the snapshot buffers (safe to call with none allocated). Only after
 // overlay-remove or teardown — mpv's overlay points into snapSurf's data.
+bool overlayBusy(Player *player) {
+    return player->overlaySeqIssued.load() > player->overlaySeqDone.load();
+}
+
+void markOverlayDone(Player *player, uint64_t seq) {
+    uint64_t cur = player->overlaySeqDone.load();
+    while (cur < seq && !player->overlaySeqDone.compare_exchange_weak(cur, seq)) {}
+}
+
+// Block until every queued overlay-add has executed (and copied its pixels).
+void overlayBarrier(Player *player) {
+    if (!player->mpv || !overlayBusy(player)) return;
+    uint64_t issued = player->overlaySeqIssued.load();
+    const char *noop[] = {"ignore", nullptr};
+    mpv_command(player->mpv, noop);
+    markOverlayDone(player, issued);
+}
+
 void releaseSnapshots(Player *player) {
+    overlayBarrier(player);
     if (player->snapSurf) cairo_surface_destroy(player->snapSurf);
     if (player->snapSurfPrev) cairo_surface_destroy(player->snapSurfPrev);
     player->snapSurf = player->snapSurfPrev = nullptr;
@@ -538,6 +634,8 @@ struct SnapCtx {
     Player *player;
     int gen;
 };
+
+void presentOverlaySurface(Player *player, cairo_surface_t *surf);
 
 // Completion of the async controls snapshot: hand the premultiplied BGRA pixels
 // to mpv as an OSD overlay. Runs on the GTK thread like the tick that issued it.
@@ -566,6 +664,10 @@ void onOverlaySnapshot(GObject *src, GAsyncResult *res, gpointer data) {
     player->snapInFlight = false;
     player->snapResets = 0;
     if (!surf) return;
+    presentOverlaySurface(player, surf);
+}
+
+void presentOverlaySurface(Player *player, cairo_surface_t *surf) {
     if (cairo_image_surface_get_format(surf) != CAIRO_FORMAT_ARGB32 ||
         cairo_image_surface_get_width(surf) <= 0 ||
         cairo_image_surface_get_height(surf) <= 0 || !player->mpv) {
@@ -598,11 +700,24 @@ void onOverlaySnapshot(GObject *src, GAsyncResult *res, gpointer data) {
                    cairo_image_surface_get_height(surf)) == 0) {
         cairo_surface_destroy(surf);
         if (player->snapStill < 1000) player->snapStill++;
-        if (player->snapStill >= 3) player->snapSkip = std::min(player->snapStill * 2, 15);
+        if (player->snapStill >= 3) {
+            player->snapSkip = player->overlayDirtyReported
+                                   ? std::min(player->snapStill * 8, kDirtyReportedSnapSkipTicks)
+                                   : std::min(player->snapStill * 2, 15);
+        }
         return;
     }
     player->snapStill = 0;
     player->snapSkip = 0;
+    if (overlayBusy(player)) {
+        if (g_get_monotonic_time() - player->overlayAsyncAt < 500000) {
+            // The previous add is still queued in mpv: drop this frame. The next
+            // capture differs from snapSurf, so it is pushed a tick later.
+            cairo_surface_destroy(surf);
+            return;
+        }
+        overlayBarrier(player);  // reply overdue: drain the queue synchronously
+    }
     char addr[32], sw[16], sh[16], sstride[16];
     snprintf(addr, sizeof addr, "&%zu",
              (size_t)(uintptr_t)cairo_image_surface_get_data(surf));
@@ -611,7 +726,12 @@ void onOverlaySnapshot(GObject *src, GAsyncResult *res, gpointer data) {
     snprintf(sstride, sizeof sstride, "%d", cairo_image_surface_get_stride(surf));
     const char *cmd[] = {"overlay-add", "0", "0", "0", addr, "0",
                          "bgra", sw, sh, sstride, nullptr};
-    mpv_command(player->mpv, cmd);
+    // No add is queued (checked above), so every earlier add has copied its
+    // pixels and snapSurfPrev can be freed below.
+    uint64_t seq = player->overlaySeqIssued.fetch_add(1) + 1;
+    player->overlayAsyncAt = g_get_monotonic_time();
+    if (mpv_command_async(player->mpv, (kOverlayReplyTag << 32) | (seq & 0xffffffffu), cmd) < 0)
+        markOverlayDone(player, seq);
     player->overlayPushed = true;
     if (player->snapSurfPrev) cairo_surface_destroy(player->snapSurfPrev);
     player->snapSurfPrev = player->snapSurf;
@@ -692,6 +812,7 @@ void compositeOverlay(Player *player) {
                 player->overlayPushed = false;
                 releaseSnapshots(player);
             }
+            wakeSnapshots(player);
         }
     }
     if (!active) {
@@ -904,18 +1025,6 @@ gboolean pushPlayerUpdate(gpointer data) {
     volumeLevel = std::max(0.0, std::min(kMaxVolumePercent / 100.0, volumeLevel));
     bool paused = mpvGetFlag(player->mpv, "pause");
     bool loading = playerLoading(player);
-    long posSec = (long)position;
-    long bufSec = (long)bufferedPosition;
-    long vol = (long)(volumeLevel * 1000);
-    if (posSec != player->lastUiPos || bufSec != player->lastUiBuf || vol != player->lastUiVol ||
-        paused != player->lastUiPaused || loading != player->lastUiLoading) {
-        player->lastUiPos = posSec;
-        player->lastUiBuf = bufSec;
-        player->lastUiVol = vol;
-        player->lastUiPaused = paused;
-        player->lastUiLoading = loading;
-        wakeSnapshots(player);
-    }
     std::string audioTracks = buildTracksJson(player->mpv, "audio");
     std::string subtitleTracks = buildTracksJson(player->mpv, "sub");
     char head[224];
@@ -924,6 +1033,8 @@ gboolean pushPlayerUpdate(gpointer data) {
              duration, position, bufferedPosition, volumeLevel, paused ? "true" : "false", loading ? "true" : "false");
     std::string js = std::string(head) + audioTracks +
                      ",subtitleTracks:" + subtitleTracks + "})";
+    if (js == player->lastUpdateJs) return G_SOURCE_CONTINUE;
+    player->lastUpdateJs = js;
     evalJs(player->webview, js);
     return G_SOURCE_CONTINUE;
 }
@@ -1042,6 +1153,8 @@ gboolean createWebviewOnGtk(gpointer data) {
         wv = gWarmupView;
         g_signal_connect(gWarmupUcm, "script-message-received::player",
                          G_CALLBACK(onPlayerMessage), player);
+        g_signal_connect(gWarmupUcm, "script-message-received::overlayDirty",
+                         G_CALLBACK(onOverlayDirty), player);
         gWarmupWindow = nullptr;
         gWarmupView = nullptr;
         gWarmupUcm = nullptr;
@@ -1057,8 +1170,11 @@ gboolean createWebviewOnGtk(gpointer data) {
 
         WebKitUserContentManager *ucm = webkit_user_content_manager_new();
         webkit_user_content_manager_register_script_message_handler(ucm, "player");
+        webkit_user_content_manager_register_script_message_handler(ucm, "overlayDirty");
         g_signal_connect(ucm, "script-message-received::player",
                          G_CALLBACK(onPlayerMessage), player);
+        g_signal_connect(ucm, "script-message-received::overlayDirty",
+                         G_CALLBACK(onOverlayDirty), player);
 
         // WebKit's DMABUF renderer yields controls snapshots with degraded alpha —
         // the semi-transparent chrome scrim reads back near-opaque (NVIDIA: stale or
@@ -1274,6 +1390,8 @@ gboolean createWebviewOnGtk(gpointer data) {
     // Grab the keyboard for the page from the start (macOS grabs first-responder
     // at creation, Windows MoveFocus()es on controller setup) — the page's own
     // keydown handler is the only keyboard path, there is no Kotlin fallback.
+    // No-op if another app has focus (e.g. an auto-next while the user is in
+    // a game); see focusOverlay.
     focusOverlay(player);
 
     // Adoption consumed the warm view — spawn the next one in the background
@@ -1461,6 +1579,7 @@ gboolean warmupOnGtk(gpointer data) {
 
     WebKitUserContentManager *ucm = webkit_user_content_manager_new();
     webkit_user_content_manager_register_script_message_handler(ucm, "player");
+    webkit_user_content_manager_register_script_message_handler(ucm, "overlayDirty");
     // controlsReady = page scripts executed end to end (same readiness signal
     // the Windows warm-up waits for). One-shot latched; harmless after
     // adoption when the player's own handler is connected alongside.
@@ -1520,6 +1639,15 @@ void runEventLoop(Player *player) {
         mpv_event *event = mpv_wait_event(player->mpv, 0.05);
         if (!event || event->event_id == MPV_EVENT_NONE) continue;
         switch (event->event_id) {
+            case MPV_EVENT_COMMAND_REPLY:
+                if ((event->reply_userdata >> 32) == kOverlayReplyTag) {
+                    // Rebuild the full sequence number from its low 32 bits.
+                    uint64_t issued = player->overlaySeqIssued.load();
+                    uint64_t seq = (issued & ~0xffffffffull) | (event->reply_userdata & 0xffffffffu);
+                    if (seq > issued) seq -= 0x100000000ull;
+                    markOverlayDone(player, seq);
+                }
+                break;
             case MPV_EVENT_LOG_MESSAGE: {
                 auto *msg = static_cast<mpv_event_log_message *>(event->data);
                 if (msg) NUVIO_LOG("mpv[%s] %s: %s", msg->level, msg->prefix, msg->text);
@@ -1571,6 +1699,15 @@ extern "C" {
 // types once and canonically; the bridge thread's gtk_init then no-ops.
 // Approach from skoruppa's linux-webkitgtk branch (initGtkEarly).
 JNIEXPORT jboolean JNICALL NP(initGtkEarly)(JNIEnv *, jobject) {
+    const char *waylandDisplay = std::getenv("WAYLAND_DISPLAY");
+    const char *sessionType = std::getenv("XDG_SESSION_TYPE");
+    if ((waylandDisplay && *waylandDisplay) ||
+        (sessionType && std::strcmp(sessionType, "wayland") == 0)) {
+        // Rootless XWayland leaves X11 windows un-reparented. AWT needs to know
+        // before it creates the first window, or its canvas can keep stale bounds.
+        setenv("_JAVA_AWT_WM_NONREPARENTING", "1", 0);
+    }
+
     // Same backend pin as gtkThreadMain: the controls overlay is driven with
     // X11/XComposite, so GTK must not come up on the Wayland backend here.
     gdk_set_allowed_backends("x11");
@@ -1587,13 +1724,14 @@ JNIEXPORT jlong JNICALL NP(create)(
     JNIEnv *env, jobject /*thiz*/, jlong hostViewPtr, jstring sourceUrl,
     jobjectArray headerLines, jboolean playWhenReady, jlong initialPositionMs,
     jstring controlsPageUrl, jint decoderPriority,
-    jboolean /*nvidiaRtxSuperResolutionEnabled*/, jobject eventSink) {
+    jboolean /*nvidiaRtxSuperResolutionEnabled*/, jboolean /*nvidiaRtxHdrEnabled*/, jobject eventSink) {
 
     // libmpv requires LC_NUMERIC=C (e.g. non-"C" locales with comma
     // decimals make mpv_create fail); the JVM uses java.util.Locale, so
     // this C-level change does not affect Java number formatting.
     setlocale(LC_NUMERIC, "C");
 
+    rememberAppXErrorHandler();
     auto *player = new Player();
     player->mpv = mpv_create();
     if (!player->mpv) {
@@ -1738,6 +1876,7 @@ JNIEXPORT jlong JNICALL NP(create)(
         }
         mpv_destroy(player->mpv);
         player->mpv = nullptr;
+        restoreAppXErrorHandler();
     }
     if (!player->mpv || initResult < 0) {
         delete player;
@@ -1800,6 +1939,7 @@ JNIEXPORT void JNICALL NP(dispose)(JNIEnv *env, jobject, jlong handle) {
     if (player->eventThread.joinable()) player->eventThread.join();
     if (player->eventSink) env->DeleteGlobalRef(player->eventSink);
     if (player->mpv) mpv_terminate_destroy(player->mpv);
+    restoreAppXErrorHandler();
     delete player;
 }
 
@@ -1817,11 +1957,13 @@ JNIEXPORT void JNICALL NP(seekTo)(JNIEnv *, jobject, jlong handle, jlong positio
     p->ended.store(false);
 }
 
+// Exact: mpv keeps relative seeks on keyframes by default, which can overshoot by
+// up to one GOP (often ~10 s).
 JNIEXPORT void JNICALL NP(seekBy)(JNIEnv *, jobject, jlong handle, jlong offsetMs) {
     Player *p = asPlayer(handle);
     if (!p) return;
     std::string delta = std::to_string(offsetMs / 1000.0);
-    const char *cmd[] = {"seek", delta.c_str(), "relative", nullptr};
+    const char *cmd[] = {"seek", delta.c_str(), "relative+exact", nullptr};
     mpv_command(p->mpv, cmd);
     p->ended.store(false);
 }
@@ -2008,7 +2150,7 @@ JNIEXPORT void JNICALL NP(applySubtitleStyle)(
     jboolean useLibass, jboolean stripSdh) {
     Player *p = asPlayer(handle);
     if (!p) return;
-    mpv_set_property_string(p->mpv, "sub-ass-override", "scale");
+    mpv_set_property_string(p->mpv, "sub-ass-override", "no");
     mpv_set_property_string(p->mpv, "sub-color", jstringToUtf8(env, textColor).c_str());
     mpv_set_property_string(p->mpv, "sub-border-color", jstringToUtf8(env, outlineColor).c_str());
     std::string background = jstringToUtf8(env, backgroundColor);
@@ -2055,6 +2197,7 @@ JNIEXPORT void JNICALL NP(updateControls)(JNIEnv *env, jobject, jlong handle, js
 }
 // Re-grant the overlay X input focus (initial grab happens at webview
 // creation; Kotlin calls this on fullscreen changes and window refocus).
+// focusOverlay ignores it unless X focus is already inside Nuvio.
 JNIEXPORT void JNICALL NP(requestFocus)(JNIEnv *, jobject, jlong handle) {
     auto *player = reinterpret_cast<Player *>(handle);
     if (!player) return;

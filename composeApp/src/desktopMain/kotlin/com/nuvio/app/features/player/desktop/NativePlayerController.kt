@@ -2,6 +2,7 @@ package com.nuvio.app.features.player.desktop
 
 import androidx.compose.ui.graphics.Color
 import co.touchlab.kermit.Logger
+import com.nuvio.app.features.power.PowerMenu
 import com.nuvio.app.features.player.PlayerControlAddonSubtitleItem
 import com.nuvio.app.features.player.PlayerControlEpisodeItem
 import com.nuvio.app.features.player.PlayerControlFilterItem
@@ -34,6 +35,7 @@ import com.nuvio.app.features.player.inferForcedSubtitleTrack
 import com.nuvio.app.features.player.toStorageHexString
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.awt.Component
 import java.awt.event.WindowAdapter
@@ -51,14 +53,15 @@ internal typealias NativePlayerCreate = (
     String,
     Int,
     Boolean,
+    Boolean,
     NativePlayerEventSink,
 ) -> Long
 
 internal class NativePlayerController(
     private val host: NativePlayerHost,
-    private val nativeCreate: NativePlayerCreate = { hostViewPtr, source, headers, playWhenReady, positionMs, controlsUrl, decoder, rtx, sink ->
+    private val nativeCreate: NativePlayerCreate = { hostViewPtr, source, headers, playWhenReady, positionMs, controlsUrl, decoder, rtx, rtxHdr, sink ->
         NativePlayerBridge.ensureLoaded()
-        NativePlayerBridge.create(hostViewPtr, source, headers, playWhenReady, positionMs, controlsUrl, decoder, rtx, sink)
+        NativePlayerBridge.create(hostViewPtr, source, headers, playWhenReady, positionMs, controlsUrl, decoder, rtx, rtxHdr, sink)
     },
     private val nativeDispose: (Long) -> Unit = NativePlayerBridge::dispose,
     private val nativeSeekTo: (Long, Long) -> Unit = NativePlayerBridge::seekTo,
@@ -74,6 +77,9 @@ internal class NativePlayerController(
 
         /** Cap on waiting for the previous player's teardown so a hung one cannot block playback. */
         const val TEARDOWN_WAIT_MS = 5_000L
+
+        /** Overlay events that are not someone using it. */
+        val PassiveControlEvents = setOf("controlsReady", "parentalGuideComplete", "hideChrome", "fetchAddonSubtitles")
 
         @Volatile
         var rememberedVolumeLevel: Float = DesktopPlayerVolumeStorage.loadVolumeLevel() ?: 1f
@@ -136,6 +142,7 @@ internal class NativePlayerController(
         initialPositionMs: Long,
         decoderPriority: Int,
         nvidiaRtxSuperResolutionEnabled: Boolean,
+        nvidiaRtxHdrEnabled: Boolean = false,
         onError: (String?) -> Unit,
     ) {
         val pending = PendingSource(
@@ -145,6 +152,7 @@ internal class NativePlayerController(
             initialPositionMs = initialPositionMs.coerceAtLeast(0L),
             decoderPriority = decoderPriority,
             nvidiaRtxSuperResolutionEnabled = nvidiaRtxSuperResolutionEnabled,
+            nvidiaRtxHdrEnabled = nvidiaRtxHdrEnabled,
             onError = onError,
         )
         var terminalFailure: String? = null
@@ -319,6 +327,7 @@ internal class NativePlayerController(
                         NativePlayerBridge.controlsPageUrl,
                         pending.decoderPriority,
                         pending.nvidiaRtxSuperResolutionEnabled,
+                        pending.nvidiaRtxHdrEnabled,
                         eventSink,
                     ).also { if (it == 0L) error("Native player did not return a handle.") }
                 }.onSuccess { created ->
@@ -505,6 +514,27 @@ internal class NativePlayerController(
         }
     }
 
+    /** Whether playback is paused, or null while there is no player to ask. */
+    val isPlaybackPaused: Boolean?
+        get() = handle.takeIf { it != 0L }?.let { current ->
+            runCatching { NativePlayerBridge.isPaused(current) }.getOrNull()
+        }
+
+    /** Shows a toast inside the player overlay, which covers the app's own toasts. */
+    fun showOverlayToast(message: String) {
+        runControlsScript(
+            "typeof showPlayerToast==='function'&&showPlayerToast(${Json.encodeToString(String.serializer(), message)})",
+        )
+    }
+
+    /** Runs [script] in the controls page. Windows only; a no-op until the player exists. */
+    fun runControlsScript(script: String) {
+        if (DesktopHostOs.current != DesktopHostOs.WINDOWS) return
+        val current = handle.takeIf { it != 0L } ?: return
+        runCatching { NativePlayerBridge.executeScript(current, script) }
+            .onFailure { error -> log.w(error) { "controls script failed handle=$current" } }
+    }
+
     fun setNowPlayingMetadata(title: String?, subtitle: String?, artworkUrl: String?) {
         if (DesktopHostOs.current != DesktopHostOs.MACOS) return
         currentNowPlayingTitle = title.orEmpty()
@@ -551,7 +581,11 @@ internal class NativePlayerController(
         if (type.shouldLogNativeControlEvent()) {
             log.d { "event received handle=$handle type=$type value=$value" }
         }
+        // Mouse and keys over the player go to the WebView, not to AWT, so the
+        // overlay's own events are how the idle check hears about them.
+        if (type !in PassiveControlEvents) ActiveDesktopPlayer.onUserActivity?.invoke()
         when (type) {
+            "powerMenu" -> PowerMenu.toggle()
             "cursorActivity" -> host.noteCursorActivity()
             "scrubChange" -> {
                 val handled = onScrubChange(value.toLong())
@@ -577,6 +611,11 @@ internal class NativePlayerController(
                     onDesktopFullscreenChanged()
                 }
             }
+            // A held-direction gamepad scrub: playback is held paused while the
+            // frame follows the target, and the scrubFinish that ends it is the
+            // real seek (see player-ui/gamepad.js).
+            "gamepadPreviewSeek" -> handle.takeIf { it != 0L }?.let { nativeSeekTo(it, value.toLong()) }
+            "gamepadSetPaused" -> handle.takeIf { it != 0L }?.let { NativePlayerBridge.setPaused(it, value != 0.0) }
             "dragWindow" -> NativePlayerBridge.beginWindowDrag(handle)
             "volumeChange" -> setFallbackVolume(value.toFloat())
             "volumeChangeTemporary" -> setTemporaryVolume(value.toFloat())
@@ -637,6 +676,11 @@ internal class NativePlayerController(
 
     fun togglePictureInPictureFromShortcut() {
         DesktopPlayerPictureInPicture.toggle()
+    }
+
+    override fun adjustVolumeBy(deltaFraction: Float): Boolean {
+        adjustFallbackVolume(deltaFraction * 100f)
+        return true
     }
 
     @Synchronized
@@ -997,6 +1041,7 @@ internal class NativePlayerController(
             initialPositionMs = pending.initialPositionMs,
             decoderPriority = pending.decoderPriority,
             nvidiaRtxSuperResolutionEnabled = pending.nvidiaRtxSuperResolutionEnabled,
+            nvidiaRtxHdrEnabled = pending.nvidiaRtxHdrEnabled,
             onError = pending.onError,
         )
     }
@@ -1185,6 +1230,8 @@ private fun String.toPlaybackLogKey(): String {
 
 private fun String.shouldLogNativeControlEvent(): Boolean {
     val normalized = lowercase()
+    // Hover previews fire on every pointer move over the seek bar.
+    if (normalized == "seekhover" || normalized == "seekleave") return false
     return normalized.contains("audio") ||
         normalized.contains("subtitle") ||
         normalized.contains("speed") ||
@@ -1250,6 +1297,7 @@ private data class PendingSource(
     val initialPositionMs: Long,
     val decoderPriority: Int,
     val nvidiaRtxSuperResolutionEnabled: Boolean,
+    val nvidiaRtxHdrEnabled: Boolean,
     val onError: (String?) -> Unit,
 )
 

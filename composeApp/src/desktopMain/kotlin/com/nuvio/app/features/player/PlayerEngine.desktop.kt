@@ -29,9 +29,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.nuvio.app.features.gamepad.GamepadRouter
+import com.nuvio.app.features.gamepad.PlayerGamepadHandler
 import com.nuvio.app.core.ui.AppPresenceState
 import com.nuvio.app.core.ui.LocalNuvioPlatformDensity
 import com.nuvio.app.core.ui.PresenceSnapshot
+import com.nuvio.app.features.player.desktop.ActiveDesktopPlayer
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerPictureInPicture
 import com.nuvio.app.features.player.desktop.NativePlayerController
@@ -175,6 +178,7 @@ private fun NativePlayerSurface(
     val playerSettings by PlayerSettingsRepository.uiState.collectAsState()
     val decoderPriority = playerSettings.decoderPriority
     val nvidiaRtxSuperResolutionEnabled = playerSettings.nvidiaRtxSuperResolutionEnabled
+    val nvidiaRtxHdrEnabled = playerSettings.nvidiaRtxHdrEnabled
 
     SideEffect {
         onControllerReady(readyController)
@@ -212,6 +216,21 @@ private fun NativePlayerSurface(
         )
     }
 
+    // While the player is up the pad drives the overlay instead of the app.
+    DisposableEffect(controller) {
+        val gamepadHandler = PlayerGamepadHandler(controller)
+        GamepadRouter.playerHandler = gamepadHandler
+        ActiveDesktopPlayer.controller = controller
+        onDispose {
+            if (GamepadRouter.playerHandler === gamepadHandler) GamepadRouter.playerHandler = null
+            if (ActiveDesktopPlayer.controller === controller) ActiveDesktopPlayer.controller = null
+        }
+    }
+    val gamepadConnected by GamepadRouter.connected.collectAsState()
+    LaunchedEffect(controller, gamepadConnected) {
+        (GamepadRouter.playerHandler as? PlayerGamepadHandler)?.setActive(gamepadConnected)
+    }
+
     DisposableEffect(controller, sourceAvailable, sourceUrl, playbackHeaders) {
         onDispose { controller.dispose() }
     }
@@ -236,6 +255,7 @@ private fun NativePlayerSurface(
         playbackHeaders,
         decoderPriority,
         nvidiaRtxSuperResolutionEnabled,
+        nvidiaRtxHdrEnabled,
         hostFirstFullSizePaintComplete.value,
         initialPositionMs,
         initialPositionRequestKey,
@@ -251,6 +271,7 @@ private fun NativePlayerSurface(
             initialPositionMs = initialPositionMs,
             decoderPriority = decoderPriority,
             nvidiaRtxSuperResolutionEnabled = nvidiaRtxSuperResolutionEnabled,
+            nvidiaRtxHdrEnabled = nvidiaRtxHdrEnabled,
             onError = { message -> latestOnError.value(message) },
         )
         initialPositionRequestKey?.let { key ->

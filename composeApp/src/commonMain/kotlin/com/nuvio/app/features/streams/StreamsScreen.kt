@@ -42,7 +42,26 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.composed
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import com.nuvio.app.controller.RegisterControllerHandler
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,7 +87,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
@@ -90,6 +109,7 @@ import com.nuvio.app.core.ui.dismissNuvioBottomSheet
 import com.nuvio.app.core.ui.withDuplicateSafeLazyKeys
 import com.nuvio.app.core.ui.featherArtwork
 import com.nuvio.app.core.ui.rememberArtworkBackdrop
+import com.nuvio.app.core.ui.platformTouchScroll
 import com.nuvio.app.features.downloads.DownloadsRepository
 import com.nuvio.app.features.details.MetaScreenSettingsRepository
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -188,6 +208,7 @@ fun StreamsScreen(
     val streamLinkCopiedText = stringResource(Res.string.streams_link_copied)
     val noDirectStreamLinkText = stringResource(Res.string.streams_no_direct_link)
     var streamActionsTarget by remember(videoId) { mutableStateOf<StreamActionsTarget?>(null) }
+    val focusedStreamTracker = remember(videoId) { FocusedStreamTracker() }
     val downloadScope = rememberCoroutineScope()
     var preferredFilterApplied by remember(videoId) { mutableStateOf(false) }
     val episodeProgress = watchProgressUiState.progressForVideo(
@@ -256,6 +277,41 @@ fun StreamsScreen(
 
     if (showLoadingScreen) return
 
+    // Controller X / Y: the hint toolbar advertises "Options" and "Reload" on this screen.
+    RegisterControllerHandler(
+        key = "streams_screen",
+        onActionX = {
+            val focused = focusedStreamTracker.current() ?: return@RegisterControllerHandler false
+            if (!focused.stream.hasStreamActions()) return@RegisterControllerHandler false
+            streamActionsTarget = StreamActionsTarget(
+                stream = focused.stream,
+                anchorInRoot = focused.anchorInRoot,
+                fromController = true,
+                restoreFocus = focused.focusRequester,
+            )
+            true
+        },
+        onActionY = {
+            reloadStreams()
+            true
+        },
+    )
+
+    // A controller-opened menu takes Compose focus; hand it back to the card once it closes.
+    var focusToRestore by remember { mutableStateOf<FocusRequester?>(null) }
+    LaunchedEffect(streamActionsTarget) {
+        val target = streamActionsTarget
+        if (target != null) {
+            focusToRestore = target.restoreFocus
+        } else {
+            focusToRestore?.let { requester ->
+                withFrameNanos { }
+                runCatching { requester.requestFocus() }
+            }
+            focusToRestore = null
+        }
+    }
+
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
@@ -263,6 +319,7 @@ fun StreamsScreen(
     ) {
         val isTabletLayout = maxWidth >= 768.dp
 
+        CompositionLocalProvider(LocalFocusedStreamTracker provides focusedStreamTracker) {
         if (isTabletLayout) {
             TabletStreamsLayout(
                 isEpisode = isEpisode,
@@ -318,6 +375,7 @@ fun StreamsScreen(
                 },
                 onRefresh = reloadStreams,
             )
+        }
         }
 
         Row(
@@ -992,6 +1050,7 @@ private fun LazyListScope.streamSection(
                     !AppFeaturePolicy.p2pEnabled &&
                     !(debridEnabled && stream.isAddonDebridCandidate)
             StreamCard(
+                modifier = Modifier.reportStreamFocus(stream),
                 stream = stream,
                 enabled = isSelectable || isUnsupportedTorrentStream,
                 appendInstantServiceToDefaultName = appendInstantServiceToDefaultName,
@@ -1006,12 +1065,12 @@ private fun LazyListScope.streamSection(
                     }
                 },
                 onLongClick = {
-                    if (stream.playableDirectUrl != null || stream.shouldOpenExternally || stream.isAddonDebridCandidate) {
+                    if (stream.hasStreamActions()) {
                         onStreamLongPress(stream)
                     }
                 },
                 onSecondaryClick = { position ->
-                    if (stream.playableDirectUrl != null || stream.shouldOpenExternally || stream.isAddonDebridCandidate) {
+                    if (stream.hasStreamActions()) {
                         onStreamSecondaryClick(stream, position)
                     }
                 },
@@ -1116,7 +1175,57 @@ private fun StreamSourceHeader(
 private data class StreamActionsTarget(
     val stream: StreamItem,
     val anchorInRoot: Offset? = null,
+    /** Opened with controller X: render in-window so the Compose focus bridge can drive it. */
+    val fromController: Boolean = false,
+    val restoreFocus: FocusRequester? = null,
 )
+
+private fun StreamItem.hasStreamActions(): Boolean =
+    playableDirectUrl != null || shouldOpenExternally || isAddonDebridCandidate
+
+private class FocusedStreamCard(
+    val stream: StreamItem,
+    val focusRequester: FocusRequester,
+) {
+    var anchorInRoot: Offset = Offset.Zero
+}
+
+/** Remembers which stream card holds Compose focus so controller X can open its actions. */
+private class FocusedStreamTracker {
+    private var focused: FocusedStreamCard? = null
+
+    fun current(): FocusedStreamCard? = focused
+
+    fun onFocusChanged(card: FocusedStreamCard, isFocused: Boolean) {
+        if (isFocused) {
+            focused = card
+        } else if (focused === card) {
+            focused = null
+        }
+    }
+}
+
+private val LocalFocusedStreamTracker = staticCompositionLocalOf<FocusedStreamTracker?> { null }
+
+private fun Modifier.reportStreamFocus(stream: StreamItem): Modifier = composed {
+    val tracker = LocalFocusedStreamTracker.current ?: return@composed this
+    val requester = remember { FocusRequester() }
+    val card = remember(stream) { FocusedStreamCard(stream, requester) }
+    DisposableEffect(card) {
+        onDispose { tracker.onFocusChanged(card, isFocused = false) }
+    }
+    this
+        .focusRequester(requester)
+        .onGloballyPositioned { coordinates ->
+            if (!coordinates.isAttached) return@onGloballyPositioned
+            val position = coordinates.positionInRoot()
+            card.anchorInRoot = Offset(
+                x = position.x + coordinates.size.width * 0.5f,
+                y = position.y + coordinates.size.height * 0.5f,
+            )
+        }
+        .onFocusChanged { tracker.onFocusChanged(card, it.isFocused) }
+}
 
 @Composable
 private fun StreamActionsHost(
@@ -1137,6 +1246,7 @@ private fun StreamActionsHost(
         DesktopStreamActionsMenu(
             stream = target.stream,
             anchorInRoot = anchor,
+            inWindow = target.fromController,
             externalPlayerSupported = externalPlayerSupported,
             externalPlayerEnabled = externalPlayerEnabled,
             showDownloadAction = showDownloadAction,
@@ -1169,6 +1279,7 @@ private data class DesktopStreamAction(
 private fun DesktopStreamActionsMenu(
     stream: StreamItem,
     anchorInRoot: Offset,
+    inWindow: Boolean,
     externalPlayerSupported: Boolean,
     externalPlayerEnabled: Boolean,
     showDownloadAction: Boolean,
@@ -1214,6 +1325,111 @@ private fun DesktopStreamActionsMenu(
         }
     }
 
+    val menuContent: @Composable (Modifier) -> Unit = { contentModifier ->
+        val firstRowFocus = remember { FocusRequester() }
+        Column(
+            modifier = contentModifier
+                .platformTouchScroll()
+                .width(244.dp)
+                .shadow(elevation = 14.dp, shape = menuShape)
+                .clip(menuShape)
+                .background(MaterialTheme.colorScheme.surface)
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+                    shape = menuShape,
+                )
+                .padding(4.dp),
+        ) {
+            actions.forEachIndexed { index, action ->
+                DesktopStreamActionRow(
+                    action = action,
+                    modifier = if (inWindow) {
+                        // Keep D-pad focus inside the menu instead of escaping to the cards behind it.
+                        Modifier
+                            .then(if (index == 0) Modifier.focusRequester(firstRowFocus) else Modifier)
+                            .focusProperties {
+                                left = FocusRequester.Cancel
+                                right = FocusRequester.Cancel
+                                if (index == 0) up = FocusRequester.Cancel
+                                if (index == actions.lastIndex) down = FocusRequester.Cancel
+                            }
+                    } else {
+                        Modifier
+                    },
+                    onSelected = {
+                        onDismiss()
+                        action.onClick()
+                    },
+                )
+            }
+        }
+        if (inWindow && actions.isNotEmpty()) {
+            LaunchedEffect(Unit) {
+                withFrameNanos { }
+                runCatching { firstRowFocus.requestFocus() }
+            }
+        }
+    }
+
+    if (inWindow) {
+        // Opened from a controller: an in-window layer (not a Popup window) so the desktop Compose
+        // focus bridge can move between rows and A activates the focused one.
+        RegisterControllerHandler(
+            key = "stream_actions_menu",
+            onBack = {
+                onDismiss()
+                true
+            },
+            onActionX = {
+                onDismiss()
+                true
+            },
+            onActionY = { true },
+            onBumperLeft = { true },
+            onBumperRight = { true },
+        )
+        var layerOrigin by remember { mutableStateOf(Offset.Zero) }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .onGloballyPositioned { coordinates -> layerOrigin = coordinates.positionInRoot() }
+                .pointerInput(Unit) { detectTapGestures { onDismiss() } }
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                        onDismiss()
+                        true
+                    } else {
+                        false
+                    }
+                },
+        ) {
+            menuContent(
+                Modifier.layout { measurable, constraints ->
+                    val placeable = measurable.measure(constraints.copy(minWidth = 0, minHeight = 0))
+                    val anchor = anchorInRoot - layerOrigin
+                    layout(constraints.maxWidth, constraints.maxHeight) {
+                        placeable.place(
+                            x = positionContextMenuAxis(
+                                pointer = anchor.x.roundToInt(),
+                                popupExtent = placeable.width,
+                                windowExtent = constraints.maxWidth,
+                                edgeMargin = edgeMarginPx,
+                            ),
+                            y = positionContextMenuAxis(
+                                pointer = anchor.y.roundToInt(),
+                                popupExtent = placeable.height,
+                                windowExtent = constraints.maxHeight,
+                                edgeMargin = edgeMarginPx,
+                            ),
+                        )
+                    }
+                },
+            )
+        }
+        return
+    }
+
     Popup(
         popupPositionProvider = remember(anchorInRoot, edgeMarginPx) {
             StreamActionsPopupPositionProvider(
@@ -1227,29 +1443,7 @@ private fun DesktopStreamActionsMenu(
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
-        Column(
-            modifier = Modifier
-                .width(244.dp)
-                .shadow(elevation = 14.dp, shape = menuShape)
-                .clip(menuShape)
-                .background(MaterialTheme.colorScheme.surface)
-                .border(
-                    width = 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
-                    shape = menuShape,
-                )
-                .padding(4.dp),
-        ) {
-            actions.forEach { action ->
-                DesktopStreamActionRow(
-                    action = action,
-                    onSelected = {
-                        onDismiss()
-                        action.onClick()
-                    },
-                )
-            }
-        }
+        menuContent(Modifier)
     }
 }
 
@@ -1257,23 +1451,26 @@ private fun DesktopStreamActionsMenu(
 private fun DesktopStreamActionRow(
     action: DesktopStreamAction,
     onSelected: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
-    val isHovered by interactionSource.collectIsHoveredAsState()
+    val isHovered by interactionSource.collectIsPointerHoveredAsState()
+    var isFocused by remember { mutableStateOf(false) }
     val rowShape = RoundedCornerShape(5.dp)
 
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .height(38.dp)
             .clip(rowShape)
             .background(
-                if (isHovered) {
-                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f)
-                } else {
-                    Color.Transparent
+                when {
+                    isFocused -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
+                    isHovered -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.09f)
+                    else -> Color.Transparent
                 },
             )
+            .onFocusChanged { isFocused = it.isFocused }
             .hoverable(interactionSource)
             .clickable(
                 interactionSource = interactionSource,
