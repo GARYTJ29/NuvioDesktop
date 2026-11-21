@@ -232,6 +232,7 @@ fun main(args: Array<String>) {
             PowerHost(window, onQuit = closeApplication)
 
             if (smokePlayerUrl == null) {
+                ClickableHandCursor(window)
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
