@@ -24,6 +24,7 @@ import com.nuvio.app.core.deeplink.handleAppUrl
 import com.nuvio.app.core.diagnostics.SentryInitializer
 import com.nuvio.app.core.ui.NuvioTheme
 import com.nuvio.app.core.ui.ProvideDesktopWindowInsets
+import com.nuvio.app.core.ui.find.FindInPageHost
 import com.nuvio.app.core.ui.platformTouchScroll
 import com.nuvio.app.features.discordrpc.DiscordPresenceManager
 import com.nuvio.app.features.gamepad.GamepadHost
@@ -246,6 +247,8 @@ fun main(args: Array<String>) {
                             MiddleClickAutoscroll { App() }
                         }
                     }
+                    // Ctrl+F find in page, drawn above the app.
+                    FindInPageHost(window)
                 }
             } else {
                 // The player surface reads LocalNuvioPlatformDensity, which only

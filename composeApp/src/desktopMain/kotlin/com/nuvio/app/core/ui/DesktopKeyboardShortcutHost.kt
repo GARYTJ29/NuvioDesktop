@@ -5,6 +5,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.focus.FocusDirection
+import com.nuvio.app.core.ui.find.FindInPage
 import java.awt.KeyEventDispatcher
 import java.awt.KeyboardFocusManager
 import java.awt.event.KeyEvent
@@ -27,6 +28,8 @@ internal fun DesktopKeyboardShortcutHost() {
         var lastEscapeAtMs = 0L
         val dispatcher = KeyEventDispatcher { event: KeyEvent ->
             if (event.id != KeyEvent.KEY_PRESSED) return@KeyEventDispatcher false
+            // Find in page (Ctrl+F, Enter/F3 to step, Esc to close) goes before Escape-as-back.
+            if (FindInPage.handleKey(event)) return@KeyEventDispatcher true
             if (event.keyCode != KeyEvent.VK_ESCAPE) return@KeyEventDispatcher false
             // IR remotes and held gamepad buttons repeat Esc; navigating twice would skip a
             // screen, so swallow presses inside the debounce window.

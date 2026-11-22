@@ -46,6 +46,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
+import com.nuvio.app.controller.controllerFocusable
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -646,16 +648,58 @@ private fun DesktopHomeHeroFrame(
                 .widthIn(max = layout.contentContainerMaxWidth)
                 .fillMaxSize(),
         ) {
+            // The whole content block is one controller/keyboard stop that outlives the page
+            // layers beneath it: Left/Right walk the banner, A/Enter opens the current item. The
+            // page dots and the inner button stay out of focus navigation. The stop reaches
+            // [ringInset] past the content on every side so its focus ring frames the block
+            // with room to spare; the outer padding gives that space back.
+            val ringInset = 20.dp
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(
-                        start = contentHorizontalPadding,
-                        end = space.s32,
-                        bottom = layout.contentVerticalPadding,
+                        start = (contentHorizontalPadding - ringInset).coerceAtLeast(0.dp),
+                        end = (space.s32 - ringInset).coerceAtLeast(0.dp),
+                        bottom = (layout.contentVerticalPadding - ringInset).coerceAtLeast(0.dp),
                     )
                     .fillMaxWidth(layout.contentWidthFraction)
-                    .widthIn(max = layout.contentMaxWidth),
+                    .widthIn(max = layout.contentMaxWidth + ringInset * 2)
+                    .controllerFocusable(
+                        id = "home_hero_banner",
+                        groupKey = "home_hero_banner",
+                        enabled = onItemClick != null,
+                        shape = RoundedCornerShape(28.dp),
+                        cornerRadius = 28.dp,
+                        selectLabel = "Open",
+                        // The pager itself loops, but the controller walks the banners as a list
+                        // with ends: Left on the first one goes on to the sidebar (the engine's
+                        // usual left edge), Right on the last one stays put.
+                        onMoveLeft = {
+                            val index = pagerState.targetPage % items.size
+                            if (items.size > 1 && index > 0) {
+                                coroutineScope.launch { pagerState.animateScrollToPage(pagerState.targetPage - 1) }
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                        onMoveRight = {
+                            val index = pagerState.targetPage % items.size
+                            if (items.size > 1 && index < items.lastIndex) {
+                                coroutineScope.launch { pagerState.animateScrollToPage(pagerState.targetPage + 1) }
+                            }
+                            true
+                        },
+                        onSelect = { onItemClick?.invoke(currentHeroItem(items, pagerState)) },
+                    )
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        enabled = onItemClick != null,
+                    ) {
+                        onItemClick?.invoke(currentHeroItem(items, pagerState))
+                    }
+                    .padding(ringInset),
                 contentAlignment = Alignment.BottomStart,
             ) {
                 HeroDesktopContentLayers(
@@ -683,6 +727,9 @@ private fun DesktopHomeHeroFrame(
                     iconSize = 24.dp,
                     containerColor = colorScheme.surfaceVariant.copy(alpha = 0.82f),
                     contentColor = colorScheme.onSurface,
+                    // Up from the banner.
+                    controllerFocusId = "home_hero_fullscreen",
+                    controllerGroupKey = "home_hero_actions",
                 )
             }
 
@@ -720,7 +767,8 @@ private fun HeroPageIndicatorRow(
             val activeFraction = heroPageVisibility(pagerState, page)
             Box(
                 modifier = Modifier
-                    .nuvioFocusBorder(CircleShape, borderWidth = 2.dp)
+                    // Mouse only: the controller pages with Left/Right on the banner.
+                    .focusProperties { canFocus = false }
                     .clickable {
                         coroutineScope.launch {
                             pagerState.animateScrollToPage(heroPageForItem(pagerState.currentPage, index, itemCount))
@@ -883,7 +931,8 @@ private fun DesktopHeroContentBlock(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .nuvioFocusBorder(RoundedCornerShape(NuvioTokens.Radius.md))
+            // The frame's content box takes focus for every page.
+            .focusProperties { canFocus = false }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -961,7 +1010,7 @@ private fun DesktopHeroContentBlock(
                 Surface(
                     modifier = Modifier
                         .height(48.dp)
-                        .nuvioFocusBorder(RoundedCornerShape(40.dp))
+                        .focusProperties { canFocus = false }
                         .clickable { onItemClick(item) },
                     color = colorScheme.onBackground,
                     contentColor = colorScheme.background,

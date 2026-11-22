@@ -256,7 +256,8 @@ object ControllerManager {
         // Deferred routes and screens without controllerFocusable nodes (e.g. details) leave the
         // engine without a focused node. Returning false lets Compose's native Enter handling
         // activate the focused button instead of the engine swallowing the key.
-        if (ControllerFocusEngine.deferNavigationToCompose) return false
+        // An open engine overlay (episode options) still takes Enter on those routes.
+        if (ControllerFocusEngine.deferNavigationToCompose && !ControllerFocusEngine.hasActiveOverlay()) return false
         if (ControllerFocusEngine.focusedNodeId.value == null) return false
         notifyNavigationInput()
         return ControllerFocusEngine.handleEvent(ControllerEvent.ButtonPressed(XboxButton.A))

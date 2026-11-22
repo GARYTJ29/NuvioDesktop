@@ -13,6 +13,7 @@ import com.nuvio.app.controller.ControllerManager
 import com.nuvio.app.controller.ControllerScreenType
 import com.nuvio.app.controller.DesktopControllerInput
 import com.nuvio.app.features.gamepad.SyntheticKeyEvent
+import com.nuvio.app.core.ui.find.FindInPage
 import com.nuvio.app.controller.XboxButton
 import com.nuvio.app.controller.audio.ControllerSoundPlayer
 import com.nuvio.app.controller.audio.DesktopControllerSound
@@ -137,6 +138,30 @@ actual fun PlatformKeyboardNavigationHost() {
 
     DesktopKeyboardShortcutHost()
 
+    // The engine handles controller events on the polling thread, but Compose focus may only change
+    // on the AWT event thread (otherwise Compose aborts with "multithreaded access to
+    // SnapshotStateObserver").
+    DisposableEffect(focusManager) {
+        ControllerFocusEngine.clearComposeFocus = {
+            val clear = { focusManager.clearFocus(force = true) }
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) clear()
+            else javax.swing.SwingUtilities.invokeLater(clear)
+        }
+        ControllerFocusEngine.uiThreadRunner = { block ->
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) {
+                block()
+            } else {
+                var result = false
+                javax.swing.SwingUtilities.invokeAndWait { result = block() }
+                result
+            }
+        }
+        onDispose {
+            ControllerFocusEngine.clearComposeFocus = null
+            ControllerFocusEngine.uiThreadRunner = null
+        }
+    }
+
     // Controller polling + navigation feedback sounds. DesktopControllerInput normalises XInput
     // (Windows) and SDL2 (Linux/macOS) into the same spatial-engine events.
     DisposableEffect(Unit) {
@@ -184,9 +209,9 @@ actual fun PlatformKeyboardNavigationHost() {
             when (event) {
                 is ControllerEvent.Navigate -> {
                     ControllerManager.notifyNavigationInput()
-                    if (focusManager.moveSpatialFocus(event.direction)) {
-                        ControllerSoundPlayer.playNavigate()
-                    }
+                    val moved = focusManager.moveSpatialFocus(event.direction)
+                    if (moved) ControllerSoundPlayer.playNavigate()
+                    ControllerFocusEngine.onComposeNavigationResult(event.direction, moved)
                 }
                 is ControllerEvent.ButtonPressed -> when (event.button) {
                     XboxButton.A -> {
@@ -212,6 +237,8 @@ actual fun PlatformKeyboardNavigationHost() {
             // Keys the controller's on-screen keyboard types (caret arrows, Enter) edit the field;
             // they are not navigation.
             if (event is SyntheticKeyEvent) return@KeyEventDispatcher false
+            // Arrow keys in the find bar move its caret, not app focus.
+            if (FindInPage.isFieldFocused) return@KeyEventDispatcher false
 
             val isPlayerActive = ControllerManager.screenContext.value.screenType ==
                 ControllerScreenType.Player
@@ -266,9 +293,9 @@ actual fun PlatformKeyboardNavigationHost() {
             // Screens without engine nodes (details, streams, settings, player) use Compose's own
             // directional focus search.
             ControllerManager.notifyNavigationInput()
-            if (focusManager.moveSpatialFocus(direction)) {
-                ControllerSoundPlayer.playNavigate()
-            }
+            val moved = focusManager.moveSpatialFocus(direction)
+            if (moved) ControllerSoundPlayer.playNavigate()
+            ControllerFocusEngine.onComposeNavigationResult(direction, moved)
             true
         }
         java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager()

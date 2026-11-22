@@ -34,14 +34,14 @@ import nuvio.composeapp.generated.resources.compose_settings_root_downloads_titl
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
-internal fun LibraryDownloadsButton(onClick: () -> Unit) {
+internal fun LibraryDownloadsButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     val downloads by remember {
         DownloadsRepository.ensureLoaded()
         DownloadsRepository.uiState
     }.collectAsStateWithLifecycle()
     val hasUnseenCompleted by DownloadsRepository.hasUnseenCompleted.collectAsStateWithLifecycle()
 
-    IconButton(onClick = onClick) {
+    IconButton(onClick = onClick, modifier = modifier) {
         when {
             downloads.items.any { it.status == DownloadStatus.Downloading } -> FlowingDownloadIcon()
             hasUnseenCompleted -> DownloadIcon(

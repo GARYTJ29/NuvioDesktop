@@ -160,6 +160,12 @@ fun NuvioScreenHeader(
     includeStatusBarPadding: Boolean = true,
     topPadding: Dp? = null,
     onBack: (() -> Unit)? = null,
+    /**
+     * Set on screens the controller's spatial engine drives: the built-in fullscreen button joins
+     * the row of controller stops with this key (the screen's own [actions] should use it too).
+     */
+    controllerGroupKey: String? = null,
+    controllerEnabled: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     val tokens = MaterialTheme.nuvio
@@ -232,6 +238,9 @@ fun NuvioScreenHeader(
                     buttonSize = 48.dp,
                     iconSize = 24.dp,
                     contentColor = tokens.colors.textPrimary,
+                    controllerFocusId = controllerGroupKey?.let { "${it}_fullscreen" },
+                    controllerGroupKey = controllerGroupKey,
+                    controllerEnabled = controllerEnabled,
                 )
                 actions()
             }

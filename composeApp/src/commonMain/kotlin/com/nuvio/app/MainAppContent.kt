@@ -211,6 +211,7 @@ import com.nuvio.app.core.ui.PresenceSnapshot
 import androidx.compose.ui.ExperimentalComposeUiApi
 import com.nuvio.app.features.player.dispatchNavigationBack
 import com.nuvio.app.core.ui.PlatformEscapeShortcut
+import com.nuvio.app.controller.ControllerFocusEngine
 import com.nuvio.app.controller.ControllerMainOverlay
 import com.nuvio.app.controller.ControllerNavigationHost
 
@@ -1426,11 +1427,41 @@ internal fun MainAppContent(
 
                 PlatformEscapeShortcut(navigateBack)
 
+                // LB/RB step through the root tabs (wrapping), only while the tabs are showing;
+                // pushed screens register their own bumper handlers (seasons, filters).
+                fun cycleRootTab(delta: Int): Boolean {
+                    if (currentRoute != null && currentRoute !is TabsRoute) return false
+                    val tabs = AppScreenTab.entries
+                    val index = tabs.indexOf(selectedTab).coerceAtLeast(0)
+                    activateTab(tabs[(index + delta).mod(tabs.size)])
+                    return true
+                }
                 ControllerNavigationHost(
                     currentRoute = currentRoute,
                     selectedTab = selectedTab,
                     onBack = {
                         navigateBack()
+                        true
+                    },
+                    onBumperLeft = { cycleRootTab(-1) },
+                    onBumperRight = { cycleRootTab(1) },
+                    // Y on Home/Library ("Search" in the hint bar): jump to the Search tab and
+                    // put the controller on its text field, ready to type.
+                    onActionY = onActionY@{
+                        if (currentRoute != null && currentRoute !is TabsRoute) return@onActionY false
+                        if (selectedTab != AppScreenTab.Home && selectedTab != AppScreenTab.Library) {
+                            return@onActionY false
+                        }
+                        activateTab(AppScreenTab.Search)
+                        searchFocusRequestCount++
+                        coroutineScope.launch {
+                            // The tab switch restores remembered focus ~240ms later; land after it.
+                            delay(300)
+                            repeat(10) {
+                                if (ControllerFocusEngine.focusVisibleTextInput()) return@launch
+                                delay(50)
+                            }
+                        }
                         true
                     },
                 )

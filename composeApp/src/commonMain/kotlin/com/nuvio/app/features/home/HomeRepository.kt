@@ -534,7 +534,12 @@ private fun prioritizeDefinitions(
     val orderedDefinitions = definitions.sortedBy { definition ->
         snapshot.preferences[definition.key]?.order ?: Int.MAX_VALUE
     }
-    val (priority, remainder) = orderedDefinitions.partition { definition ->
+    // The hero waits for every hero source, so fetch those first: a hero source placed at the
+    // bottom of the home page would otherwise hold the hero back until nearly every row loaded.
+    val (heroSources, rows) = orderedDefinitions.partition { definition ->
+        snapshot.heroEnabled && snapshot.preferences[definition.key]?.heroSourceEnabled != false
+    }
+    val (priority, remainder) = rows.partition { definition ->
         val preference = snapshot.preferences[definition.key]
         if (preference == null) {
             true
@@ -542,5 +547,5 @@ private fun prioritizeDefinitions(
             preference.enabled || (snapshot.heroEnabled && preference.heroSourceEnabled)
         }
     }
-    return priority + remainder
+    return heroSources + priority + remainder
 }

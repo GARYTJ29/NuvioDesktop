@@ -12,7 +12,11 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.platform.LocalFocusManager
+import com.nuvio.app.controller.ControllerFocusEngine
+import com.nuvio.app.controller.controllerFocusable
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -120,6 +124,21 @@ fun SearchScreen(
         if (directionalInput) focusRequester.freeFocus()
     }
 
+    // The controller's spatial engine selects the field and recent searches without giving them
+    // Compose focus, so the recent list also follows the engine's selection.
+    val engineFocus by ControllerFocusEngine.focusedNodeSnapshot.collectAsState()
+    val engineGroup = engineFocus?.groupKey.takeIf { directionalInput }
+    val engineInSearchArea = engineGroup == SearchFieldGroupKey ||
+        engineGroup?.startsWith(SearchRecentGroupPrefix) == true
+    // After typing, the field keeps Compose focus; once the pad moves on, let it go, or A on the
+    // next item would reopen the on-screen keyboard instead of opening the item.
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(engineFocus?.id) {
+        if (directionalInput && isSearchFocused && engineFocus != null && !engineInSearchArea) {
+            focusManager.clearFocus()
+        }
+    }
+
     ScreenActivityEffect(listState) { screenActive ->
         if (!screenActive) {
             isSearchFocused = false
@@ -154,6 +173,9 @@ fun SearchScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var lastRequestedQuery by rememberSaveable { mutableStateOf<String?>(null) }
     var observedOfflineState by remember { mutableStateOf(false) }
+    val searchFieldReachable by remember(listState) {
+        derivedStateOf { listState.firstVisibleItemIndex <= 1 }
+    }
     val discoverInFocus by remember(query, listState) {
         derivedStateOf {
             query.isBlank() && listState.firstVisibleItemIndex > 0
@@ -297,7 +319,34 @@ fun SearchScreen(
                         topPadding = topChromePadding,
                     )
                     androidx.compose.foundation.layout.Spacer(modifier = Modifier.height(6.dp))
-                    androidx.compose.foundation.layout.Box(modifier = Modifier.padding(horizontal = 16.dp)) {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier
+                            .padding(horizontal = 16.dp)
+                            .then(
+                                if (isDesktop) {
+                                    Modifier.controllerFocusable(
+                                        id = SearchFieldFocusId,
+                                        groupKey = SearchFieldGroupKey,
+                                        // Only near the top: the header is sticky, and a stop that
+                                        // is always on screen would catch Up from deep in the list.
+                                        enabled = searchFieldReachable,
+                                        isTextInput = true,
+                                        shape = RoundedCornerShape(NuvioTokens.Radius.xl),
+                                        cornerRadius = NuvioTokens.Radius.xl,
+                                        selectLabel = "Type",
+                                        secondaryActionLabel = if (query.isNotBlank()) "Clear" else null,
+                                        onSecondaryAction = if (query.isNotBlank()) {
+                                            { query = "" }
+                                        } else {
+                                            null
+                                        },
+                                        onSelect = { focusRequester.requestFocus() },
+                                    )
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                    ) {
                         NuvioInputField(
                             value = query,
                             onValueChange = {
@@ -315,7 +364,25 @@ fun SearchScreen(
                                 },
                             trailingContent = if (query.isNotBlank()) {
                                 {
-                                    IconButton(onClick = { query = "" }) {
+                                    IconButton(
+                                        onClick = { query = "" },
+                                        modifier = if (isDesktop) {
+                                            Modifier.controllerFocusable(
+                                                id = SearchClearFocusId,
+                                                groupKey = SearchFieldGroupKey,
+                                                enabled = searchFieldReachable,
+                                                shape = CircleShape,
+                                                selectLabel = "Clear",
+                                                onSelect = {
+                                                    query = ""
+                                                    // This button leaves with the text; stay on the field.
+                                                    ControllerFocusEngine.requestFocus(SearchFieldFocusId, triggerScroll = false)
+                                                },
+                                            )
+                                        } else {
+                                            Modifier
+                                        },
+                                    ) {
                                         Icon(
                                             imageVector = Icons.Rounded.Close,
                                             contentDescription = stringResource(Res.string.compose_search_clear),
@@ -335,15 +402,20 @@ fun SearchScreen(
 
         if (query.isBlank()) {
             // The list stays up while the pad has moved focus down into it.
-            if ((isSearchFocused || isRecentFocused) && recentSearches.isNotEmpty()) {
+            if ((isSearchFocused || isRecentFocused || engineInSearchArea) && recentSearches.isNotEmpty()) {
                 captureSearchFocus()
                 item(key = "recent_searches") {
                     SearchRecentSection(
                         recentSearches = recentSearches,
                         onSearchPress = { recentQuery ->
                             query = recentQuery
-                            // Back to the field, so the d-pad goes on to the results.
-                            focusRequester.requestFocus()
+                            // Back to the field, so the d-pad goes on to the results. A pad
+                            // only moves the engine's selection; typing is one A away.
+                            if (directionalInput && isDesktop) {
+                                ControllerFocusEngine.requestFocus(SearchFieldFocusId, triggerScroll = false)
+                            } else {
+                                focusRequester.requestFocus()
+                            }
                         },
                         onRemoveSearch = SearchHistoryRepository::removeSearch,
                         modifier = Modifier.onFocusChanged { isRecentFocused = it.hasFocus },
@@ -506,6 +578,11 @@ private fun SearchEmptyStateCard(
     )
 }
 
+private const val SearchFieldFocusId = "search_field"
+private const val SearchClearFocusId = "search_field_clear"
+private const val SearchFieldGroupKey = "search_field_row"
+private const val SearchRecentGroupPrefix = "search_recent_"
+
 @Composable
 private fun SearchRecentSection(
     recentSearches: List<String>,
@@ -525,11 +602,12 @@ private fun SearchRecentSection(
             color = MaterialTheme.colorScheme.onBackground,
         )
         Spacer(modifier = Modifier.height(4.dp))
-        recentSearches.forEach { recentQuery ->
+        recentSearches.forEachIndexed { index, recentQuery ->
             SearchRecentRow(
                 query = recentQuery,
                 onSearchPress = { onSearchPress(recentQuery) },
                 onRemovePress = { onRemoveSearch(recentQuery) },
+                controllerIndex = if (isDesktop) index else null,
             )
         }
         Spacer(modifier = Modifier.height(6.dp))
@@ -542,10 +620,29 @@ internal fun SearchRecentRow(
     onSearchPress: () -> Unit,
     onRemovePress: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Position in the list; set where the controller's spatial engine drives the screen. */
+    controllerIndex: Int? = null,
 ) {
+    // Each recent search is one engine row: the query, then its remove button to the right.
+    val rowGroupKey = controllerIndex?.let { "$SearchRecentGroupPrefix$it" }
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .then(
+                if (rowGroupKey != null) {
+                    Modifier.controllerFocusable(
+                        id = rowGroupKey,
+                        groupKey = rowGroupKey,
+                        shape = RoundedCornerShape(16.dp),
+                        selectLabel = "Search",
+                        secondaryActionLabel = "Remove",
+                        onSecondaryAction = onRemovePress,
+                        onSelect = onSearchPress,
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .clickable(onClick = onSearchPress)
             .padding(vertical = 2.dp)
             .background(
@@ -564,7 +661,20 @@ internal fun SearchRecentRow(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
-        IconButton(onClick = onRemovePress) {
+        IconButton(
+            onClick = onRemovePress,
+            modifier = if (rowGroupKey != null) {
+                Modifier.controllerFocusable(
+                    id = "${rowGroupKey}_remove",
+                    groupKey = rowGroupKey,
+                    shape = CircleShape,
+                    selectLabel = "Remove",
+                    onSelect = onRemovePress,
+                )
+            } else {
+                Modifier
+            },
+        ) {
             Icon(
                 imageVector = Icons.Rounded.Close,
                 contentDescription = stringResource(Res.string.compose_search_remove_recent_search),

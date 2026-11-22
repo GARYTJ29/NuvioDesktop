@@ -109,10 +109,13 @@ object PosterZoomOverlayCoordinator {
 
     fun show() {
         isVisible = true
+        // The menu is modal for the controller too: nothing behind it may be moved or pressed.
+        com.nuvio.app.controller.ControllerFocusEngine.onModalOverlayVisibilityChanged(true)
     }
 
     fun hide() {
         isVisible = false
+        com.nuvio.app.controller.ControllerFocusEngine.onModalOverlayVisibilityChanged(false)
     }
 }
 

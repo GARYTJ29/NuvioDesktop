@@ -1,6 +1,7 @@
 package com.nuvio.app.core.ui
 
 import androidx.compose.foundation.Canvas
+import com.nuvio.app.controller.controllerStop
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -45,6 +46,10 @@ internal fun FullscreenActionButton(
     iconSize: Dp = 24.dp,
     containerColor: Color = Color.Transparent,
     contentColor: Color = MaterialTheme.colorScheme.onBackground,
+    /** Makes the button a controller stop; see [com.nuvio.app.controller.controllerStop]. */
+    controllerFocusId: String? = null,
+    controllerGroupKey: String? = null,
+    controllerEnabled: Boolean = true,
 ) {
     if (!isFullscreenActionSupported) return
 
@@ -61,6 +66,14 @@ internal fun FullscreenActionButton(
         modifier = modifier
             .size(buttonSize)
             .nuvioFocusBorder(CircleShape)
+            .controllerStop(
+                id = controllerFocusId,
+                groupKey = controllerGroupKey,
+                enabled = enabled && controllerEnabled,
+                shape = CircleShape,
+                selectLabel = label,
+                onSelect = ::toggleFullscreenAction,
+            )
             .clip(CircleShape)
             .background(containerColor)
             .clickable(
