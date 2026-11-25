@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.input.AppNavigationBridge
+import com.nuvio.app.controller.ControllerManager
 import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.ui.NuvioInputField
@@ -147,9 +148,14 @@ fun SearchScreen(
         }
     }
 
+    var handledFocusRequests by rememberSaveable { mutableStateOf(0) }
     ScreenActivityEffect(searchFocusRequestCount) { screenActive ->
         if (screenActive && searchFocusRequestCount > 0) {
-            focusRequester.requestFocus()
+            val fresh = searchFocusRequestCount > handledFocusRequests
+            handledFocusRequests = searchFocusRequestCount
+            if (fresh || !ControllerManager.isNavigationActive.value) {
+                focusRequester.requestFocus()
+            }
         }
     }
 

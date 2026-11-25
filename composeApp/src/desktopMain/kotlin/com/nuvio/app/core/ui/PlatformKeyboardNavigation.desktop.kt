@@ -24,6 +24,7 @@ import java.awt.Toolkit
 import java.awt.event.AWTEventListener
 import java.awt.event.KeyEvent
 import java.awt.event.MouseEvent
+import kotlinx.coroutines.delay
 
 /**
  * Route generation whose screen already received a seeded Compose focus. Compose keeps previous
@@ -108,6 +109,15 @@ private fun FocusManager.moveSpatialFocus(direction: ControllerDirection): Boole
     }
     if (moveFocus(composeDirection)) return true
 
+    // Nothing holds Compose focus (e.g. the spatial ring was cleared when a Compose-driven route
+    // opened): seed a target immediately, even if this route was already seeded once.
+    if (!com.nuvio.app.core.ui.FocusPresence.hasAnyFocus) {
+        clearFocus(force = true)
+        if (moveFocus(FocusDirection.Next)) {
+            return moveFocus(composeDirection)
+        }
+    }
+
     // Seed the incoming screen once per route change, then apply the requested move so the first
     // arrow press reacts instead of being swallowed (previously users had to press Tab).
     if (seedRouteFocusIfNeeded()) {
@@ -135,6 +145,8 @@ private fun applyNavigationCursor(hidden: Boolean) {
 @Composable
 actual fun PlatformKeyboardNavigationHost() {
     val focusManager = LocalFocusManager.current
+    // Popups and modal sheets own their own focus manager; arrows must move focus inside them.
+    val activeFocusManager = { ComposePopupFocus.active ?: focusManager }
 
     DesktopKeyboardShortcutHost()
 
@@ -194,6 +206,18 @@ actual fun PlatformKeyboardNavigationHost() {
         onDispose { Toolkit.getDefaultToolkit().removeAWTEventListener(listener) }
     }
 
+    // Compose-driven routes (settings leaves, details) start with no focus target, which left
+    // Return dead and Esc/Tab jumping to the sidebar. Seed a focus target once the route settles.
+    LaunchedEffect(Unit) {
+        ControllerFocusEngine.routeGeneration.collect {
+            delay(180)
+            if (ControllerFocusEngine.hasInteractiveContent.value) return@collect
+            if (FocusPresence.hasAnyFocus) return@collect
+            focusManager.clearFocus(force = true)
+            if (!ContentEntry.request()) focusManager.moveFocus(FocusDirection.Next)
+        }
+    }
+
     // Hide the mouse pointer while the user navigates with a controller or the keyboard; the first
     // real mouse movement switches navigation off again and restores it.
     LaunchedEffect(Unit) {
@@ -209,14 +233,18 @@ actual fun PlatformKeyboardNavigationHost() {
             when (event) {
                 is ControllerEvent.Navigate -> {
                     ControllerManager.notifyNavigationInput()
-                    val moved = focusManager.moveSpatialFocus(event.direction)
-                    if (moved) ControllerSoundPlayer.playNavigate()
+                    val moved = activeFocusManager().moveSpatialFocus(event.direction)
+                    if (moved) {
+                        ControllerSoundPlayer.playNavigate()
+                    } else if (event.direction == ControllerDirection.Up || event.direction == ControllerDirection.Down) {
+                        ControllerFocusEngine.scrollActivePage(down = event.direction == ControllerDirection.Down)
+                    }
                     ControllerFocusEngine.onComposeNavigationResult(event.direction, moved)
                 }
                 is ControllerEvent.ButtonPressed -> when (event.button) {
                     XboxButton.A -> {
                         ControllerSoundPlayer.playSelect()
-                        focusManager.activateSpatialFocus()
+                        activeFocusManager().activateSpatialFocus()
                     }
                     // The engine routes B to registered global back handlers; when a screen does not
                     // register one, fall back to the same navigation back used by the Escape key.
@@ -247,6 +275,26 @@ actual fun PlatformKeyboardNavigationHost() {
             if (isPlayerActive) {
                 if (event.keyCode == KeyEvent.VK_SPACE || event.keyCode == KeyEvent.VK_ENTER) {
                     if (PlayerControllerBridge.dispatch(PlayerCommand.TogglePlayback)) {
+                        return@KeyEventDispatcher true
+                    }
+                }
+            }
+
+            // Keyboard equivalents of the controller hint-bar actions. They mirror the gamepad
+            // handlers (Y=Search, LB/RB=Tabs, Menu=Navigation, X=Options) and are ignored inside
+            // the player, where those keys belong to playback.
+            if (!isPlayerActive) {
+                val shortcutButton = when {
+                    event.isControlDown && event.keyCode == KeyEvent.VK_K -> XboxButton.Y
+                    event.isControlDown && event.keyCode == KeyEvent.VK_TAB ->
+                        if (event.isShiftDown) XboxButton.LB else XboxButton.RB
+                    event.isControlDown && event.keyCode == KeyEvent.VK_B -> XboxButton.Menu
+                    event.keyCode == KeyEvent.VK_CONTEXT_MENU ||
+                        (event.isShiftDown && event.keyCode == KeyEvent.VK_F10) -> XboxButton.X
+                    else -> null
+                }
+                if (shortcutButton != null) {
+                    if (ControllerManager.dispatchKeyboardShortcut(shortcutButton)) {
                         return@KeyEventDispatcher true
                     }
                 }
@@ -291,10 +339,15 @@ actual fun PlatformKeyboardNavigationHost() {
             }
 
             // Screens without engine nodes (details, streams, settings, player) use Compose's own
-            // directional focus search.
+            // directional focus search. When focus cannot move further but the page has more
+            // content, scroll it a page so navigation keeps going to the end of the list.
             ControllerManager.notifyNavigationInput()
-            val moved = focusManager.moveSpatialFocus(direction)
-            if (moved) ControllerSoundPlayer.playNavigate()
+            val moved = activeFocusManager().moveSpatialFocus(direction)
+            if (moved) {
+                ControllerSoundPlayer.playNavigate()
+            } else if (direction == ControllerDirection.Up || direction == ControllerDirection.Down) {
+                ControllerFocusEngine.scrollActivePage(down = direction == ControllerDirection.Down)
+            }
             ControllerFocusEngine.onComposeNavigationResult(direction, moved)
             true
         }
