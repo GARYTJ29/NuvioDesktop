@@ -137,7 +137,13 @@ object StreamsRepository {
         }
 
         val embeddedStreams = MetaDetailsRepository.findEmbeddedStreams(videoId)
-        if (embeddedStreams.isNotEmpty()) {
+        // Embedded streams come from the cached meta, so reusing them on a reload would put the
+        // same list back instantly. A reload asks the stream addons instead when one serves this item.
+        val reloadFromAddons = forceRefresh && embeddedStreams.isNotEmpty() &&
+            AddonRepository.uiState.value.addons.enabledAddons().any { addon ->
+                addon.manifest?.supportsStream(type, videoId) == true
+            }
+        if (embeddedStreams.isNotEmpty() && !reloadFromAddons) {
             log.d { "Using ${embeddedStreams.size} embedded streams for type=$type id=$videoId" }
             val group = AddonStreamGroup(
                 addonName = embeddedStreams.first().addonName,

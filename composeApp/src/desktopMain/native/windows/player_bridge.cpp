@@ -1841,7 +1841,7 @@ private:
                 setMpvOptionStringLocked("http-header-fields", headers.c_str());
             }
 
-            configureThumbfastLocked();
+            configureThumbfastLocked(sourceUrl);
 
             int initResult = api.initialize(mpv);
             if (initResult < 0) {
@@ -2157,12 +2157,19 @@ private:
         (void)mpvApi().setOptionString(mpv, name, value);
     }
 
+    static bool isYouTubeMediaUrl(const std::string &url) {
+        return url.find(".googlevideo.com/") != std::string::npos ||
+            url.find(".youtube.com/") != std::string::npos;
+    }
+
     // Seek-bar hover thumbnails. thumbfast.lua runs inside this libmpv and spawns
     // the bundled standalone mpv.exe to decode frames, which it draws back into
     // this player with overlay-add. Both files ship next to player_bridge.dll.
-    // NUVIO_THUMBFAST=0 turns the feature off.
-    void configureThumbfastLocked() {
+    // NUVIO_THUMBFAST=0 turns the feature off. YouTube streams skip it: the thumbnailer
+    // would open YouTube's HLS master playlist a second time, which is slow to start.
+    void configureThumbfastLocked(const std::string &sourceUrl) {
         thumbfastLoaded = false;
+        if (isYouTubeMediaUrl(sourceUrl)) return;
         wchar_t toggle[8] = {};
         DWORD toggleLength = GetEnvironmentVariableW(L"NUVIO_THUMBFAST", toggle, (DWORD)(sizeof(toggle) / sizeof(toggle[0])));
         if (toggleLength > 0 && toggleLength < 8 && wcscmp(toggle, L"0") == 0) return;

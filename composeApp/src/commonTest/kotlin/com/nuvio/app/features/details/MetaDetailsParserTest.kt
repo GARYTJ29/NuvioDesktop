@@ -18,6 +18,24 @@ import kotlin.test.assertTrue
 class MetaDetailsParserTest {
 
     @Test
+    fun `parse keeps an embedded stream whose only source is ytId`() {
+        val result = MetaDetailsParser.parse(
+            """
+            {"meta":{"id":"yt_id:abc","type":"YouTube","name":"Video","videos":[{"id":"yt_id:abc:1:1",
+              "title":"Video","season":1,"episode":1,"streams":[
+                {"name":"Stremio Player","ytId":" dQw4w9WgXcQ "},
+                {"name":"External Player","externalUrl":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}
+              ]}]}}
+            """.trimIndent(),
+        )
+
+        val streams = result.videos.single().streams
+        assertEquals(listOf("Stremio Player", "External Player"), streams.map { it.name })
+        assertEquals("dQw4w9WgXcQ", streams.first().youTubeIdToResolve)
+    }
+
+
+    @Test
     fun `parse rejects null meta object without json object cast crash`() {
         assertFailsWith<IllegalStateException> {
             MetaDetailsParser.parse("""{"meta":null}""")
