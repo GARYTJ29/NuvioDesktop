@@ -174,7 +174,14 @@
           <button class="header-button" id="submitIntroButton" data-command="submitIntro" aria-label="Submit intro"><svg><use href="#icon-flag"></use></svg></button>
           <button class="header-button" id="partyButton" type="button" aria-label="Watch party" hidden><svg><use href="#icon-party"></use></svg></button>
           <button class="header-button" id="videoSettingsButton" data-command="videoSettings" aria-label="Video settings"><svg><use href="#icon-build"></use></svg></button>
-          <button class="header-button frame-gen-button" id="frameGenButton" type="button" aria-pressed="false" aria-label="Frame generation: off" hidden><svg><use href="#icon-frame-gen"></use></svg><span class="frame-gen-badge" id="frameGenBadge" aria-hidden="true"></span></button>
+          <div class="frame-gen-anchor" id="frameGenAnchor" hidden>
+            <button class="header-button frame-gen-button" id="frameGenButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="frameGenMenu" aria-label="Frame generation: off"><svg><use href="#icon-frame-gen"></use></svg><span class="frame-gen-badge" id="frameGenBadge" aria-hidden="true"></span></button>
+            <div class="frame-gen-menu" id="frameGenMenu" role="menu" aria-label="Frame generation" hidden>
+              <div class="frame-gen-menu-title">Frame generation</div>
+              <div class="frame-gen-menu-items" id="frameGenMenuItems"></div>
+              <div class="frame-gen-menu-note" id="frameGenMenuNote" hidden></div>
+            </div>
+          </div>
           <button class="header-button pip-lock-button" id="pipLockButton" type="button" aria-pressed="false" aria-label="Lock player controls"><svg><use href="#icon-lock"></use></svg></button>
           <button class="header-button" id="pipButton" data-command="pictureInPicture" aria-label=""><svg><use href="#icon-pip"></use></svg></button>
           <button class="header-button" id="fullscreenButton" data-command="toggleFullscreen" aria-label="Enter fullscreen"><svg><use id="fullscreenIcon" href="#icon-fullscreen"></use></svg></button>

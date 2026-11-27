@@ -594,20 +594,132 @@ const showPlayerToast = (message, { durationMs = playerToastDurationMs, icon = n
 // DLSS frame generation (Windows, NVIDIA). The native bridge owns the state:
 // it applies the filter and reports, through window.playerFrameGeneration,
 // whether DLSS-G actually started (and at which multiplier) or why it could not.
-// The button only asks for the next multiplier: Off -> 2x -> 3x -> 4x -> Off.
+// The button opens a dropdown (Off, 2x, 3x, 4x); the badge shows what runs.
+const frameGenAnchor = document.getElementById("frameGenAnchor");
 const frameGenButton = document.getElementById("frameGenButton");
 const frameGenBadge = document.getElementById("frameGenBadge");
+const frameGenMenu = document.getElementById("frameGenMenu");
+const frameGenMenuItems = document.getElementById("frameGenMenuItems");
+const frameGenMenuNote = document.getElementById("frameGenMenuNote");
 let frameGen = { available: false, multiplier: 0, active: 0, maxMultiplier: 4, status: "off", reason: "" };
+let frameGenMenuOpen = false;
 
 const frameGenShownMultiplier = () => (frameGen.status === "failed" ? 0 : frameGen.active || frameGen.multiplier);
+const frameGenSelectedMultiplier = () => (frameGen.status === "failed" ? 0 : frameGen.multiplier);
+const isFrameGenMenuOpen = () => frameGenMenuOpen;
+
+const frameGenOptions = () => {
+  const max = Math.max(2, Number(frameGen.maxMultiplier) || 4);
+  const options = [0];
+  for (let multiplier = 2; multiplier <= max; multiplier++) options.push(multiplier);
+  return options;
+};
+
+const frameGenOptionButtons = () =>
+  frameGenMenuItems ? Array.from(frameGenMenuItems.querySelectorAll(".frame-gen-option")) : [];
+
+const renderFrameGenMenu = () => {
+  if (!frameGenMenuItems) return;
+  const selected = frameGenSelectedMultiplier();
+  const options = frameGenOptions();
+  const key = options.join(",");
+  if (frameGenMenuItems.dataset.options !== key) {
+    frameGenMenuItems.dataset.options = key;
+    frameGenMenuItems.replaceChildren(...options.map(multiplier => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "frame-gen-option";
+      option.setAttribute("role", "menuitemradio");
+      option.dataset.multiplier = String(multiplier);
+      option.innerHTML =
+        '<svg class="frame-gen-option-check" aria-hidden="true"><use href="#icon-check"></use></svg>' +
+        `<span class="frame-gen-option-label">${multiplier > 0 ? `${multiplier}x` : "Off"}</span>` +
+        '<span class="frame-gen-option-hint"></span>';
+      option.addEventListener("click", event => {
+        event.stopPropagation();
+        chooseFrameGenMultiplier(multiplier);
+      });
+      return option;
+    }));
+  }
+  for (const option of frameGenOptionButtons()) {
+    const multiplier = Number(option.dataset.multiplier);
+    const isSelected = multiplier === selected;
+    setAttr(option, "aria-checked", String(isSelected));
+    let hint = "";
+    if (isSelected && multiplier > 0) {
+      if (frameGen.status === "starting") hint = "starting...";
+      // The GPU tops out below what was asked (RTX 40 runs 2x).
+      else if (frameGen.status === "on" && frameGen.active > 0 && frameGen.active < multiplier) hint = `running ${frameGen.active}x`;
+    }
+    const hintEl = option.querySelector(".frame-gen-option-hint");
+    if (hintEl) setTextContent(hintEl, hint);
+  }
+  if (frameGenMenuNote) {
+    const note = frameGen.status === "failed" ? `Unavailable: ${frameGen.reason || "unknown reason"}` : "";
+    setTextContent(frameGenMenuNote, note);
+    setVisible(frameGenMenuNote, Boolean(note));
+  }
+};
+
+const focusFrameGenOption = option => {
+  if (!option) return;
+  frameGenOptionButtons().forEach(button => button.classList.toggle("focused", button === option));
+  option.focus({ preventScroll: true });
+};
+
+const moveFrameGenMenuFocus = delta => {
+  const options = frameGenOptionButtons();
+  if (!options.length) return;
+  const current = options.indexOf(document.activeElement);
+  const fallback = options.findIndex(option => option.getAttribute("aria-checked") === "true");
+  const index = current >= 0
+    ? Math.max(0, Math.min(options.length - 1, current + delta))
+    : Math.max(0, fallback);
+  focusFrameGenOption(options[index]);
+};
+
+const openFrameGenMenu = () => {
+  if (!frameGenMenu || !frameGen.available || frameGenMenuOpen) return;
+  frameGenMenuOpen = true;
+  renderFrameGenMenu();
+  setVisible(frameGenMenu, true);
+  setAttr(frameGenButton, "aria-expanded", "true");
+  noteChromeActivity(true);
+  const options = frameGenOptionButtons();
+  focusFrameGenOption(options.find(option => option.getAttribute("aria-checked") === "true") || options[0]);
+};
+
+const closeFrameGenMenu = ({ restoreFocus = false } = {}) => {
+  if (!frameGenMenuOpen) return;
+  frameGenMenuOpen = false;
+  setVisible(frameGenMenu, false);
+  setAttr(frameGenButton, "aria-expanded", "false");
+  frameGenOptionButtons().forEach(button => button.classList.remove("focused"));
+  if (restoreFocus) frameGenButton.focus({ preventScroll: true });
+  else if (frameGenMenu.contains(document.activeElement)) focusShortcutRoot();
+  noteChromeActivity(true);
+};
+
+const activateFrameGenMenuFocus = () => {
+  const options = frameGenOptionButtons();
+  const option = options.find(button => button === document.activeElement) ||
+    options.find(button => button.classList.contains("focused"));
+  if (option) option.click();
+};
+
+const chooseFrameGenMultiplier = multiplier => {
+  closeFrameGenMenu({ restoreFocus: true });
+  if (multiplier === frameGenSelectedMultiplier()) return;
+  send("setFrameGeneration", multiplier);
+};
 
 const renderFrameGeneration = () => {
   if (!frameGenButton) return;
-  setVisible(frameGenButton, Boolean(frameGen.available));
+  setVisible(frameGenAnchor || frameGenButton, Boolean(frameGen.available));
+  if (!frameGen.available) closeFrameGenMenu();
   const shown = frameGenShownMultiplier();
-  frameGenButton.setAttribute("aria-pressed", String(shown > 0));
   frameGenButton.classList.toggle("is-starting", frameGen.status === "starting");
-  frameGenButton.classList.toggle("is-failed", frameGen.status === "failed");
   let label = "Frame generation: off";
   if (frameGen.status === "failed") label = `Frame generation unavailable: ${frameGen.reason || "unknown reason"}`;
   else if (frameGen.status === "starting") label = `Frame generation: starting ${frameGen.multiplier}x`;
@@ -615,14 +727,7 @@ const renderFrameGeneration = () => {
   setAttr(frameGenButton, "aria-label", label);
   setAttr(frameGenButton, "title", label);
   if (frameGenBadge) setTextContent(frameGenBadge, shown > 0 ? `${shown}x` : "");
-};
-
-const nextFrameGenMultiplier = () => {
-  const max = Number(frameGen.maxMultiplier) || 4;
-  if (frameGen.status === "failed" || frameGen.multiplier <= 0) return 2;
-  // The GPU tops out below what was asked (RTX 40 runs 2x): the next press turns FG off.
-  if (frameGen.status === "on" && frameGen.active > 0 && frameGen.active < frameGen.multiplier) return 0;
-  return frameGen.multiplier >= max ? 0 : frameGen.multiplier + 1;
+  if (frameGenMenuOpen) renderFrameGenMenu();
 };
 
 window.playerFrameGeneration = next => {
@@ -645,10 +750,46 @@ window.playerFrameGeneration = next => {
 if (frameGenButton) {
   frameGenButton.addEventListener("click", event => {
     event.stopPropagation();
-    noteChromeActivity(true);
-    send("setFrameGeneration", nextFrameGenMultiplier());
+    if (frameGenMenuOpen) closeFrameGenMenu({ restoreFocus: true });
+    else openFrameGenMenu();
   });
 }
+
+if (frameGenMenu) {
+  frameGenMenu.addEventListener("click", event => event.stopPropagation());
+  frameGenMenu.addEventListener("pointermove", () => noteChromeActivity());
+}
+
+// While the dropdown is open it owns the arrows, Enter/Space and Escape, ahead
+// of the player's shortcuts (seek, volume, play/pause, close).
+document.addEventListener("keydown", event => {
+  if (!frameGenMenuOpen) return;
+  let handled = true;
+  switch (event.key) {
+    case "ArrowDown": moveFrameGenMenuFocus(1); break;
+    case "ArrowUp": moveFrameGenMenuFocus(-1); break;
+    case "Home": focusFrameGenOption(frameGenOptionButtons()[0]); break;
+    case "End": focusFrameGenOption(frameGenOptionButtons().slice(-1)[0]); break;
+    case "Enter":
+    case " ":
+      if (!event.repeat) activateFrameGenMenuFocus();
+      break;
+    case "Escape": closeFrameGenMenu({ restoreFocus: true }); break;
+    // Any other key is a player shortcut: let it run with the dropdown closed.
+    default: closeFrameGenMenu(); handled = false;
+  }
+  if (!handled) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  noteChromeActivity(true);
+}, true);
+
+// A press outside closes the dropdown without also toggling playback.
+document.addEventListener("pointerdown", event => {
+  if (!frameGenMenuOpen || (frameGenAnchor && frameGenAnchor.contains(event.target))) return;
+  closeFrameGenMenu();
+  setSuppressNextRootClick();
+}, true);
 
 const settingToastLabel = command => {
   if (command === "resize") return state.resizeModeLabel || "Fit";
@@ -2698,6 +2839,7 @@ const canAutoHideChrome = showOpening => Boolean(
   !state.isLoading &&
   !activeModal &&
   !isScrubbing &&
+  !frameGenMenuOpen &&
   !isInteractingWithChrome() &&
   !playbackErrorText() &&
   !showOpening,
@@ -2712,6 +2854,7 @@ const currentChromeAutoHideKey = showOpening => {
     state.isLoading ? "loading" : "ready",
     activeModal || "none",
     isScrubbing ? "scrubbing" : "idle",
+    frameGenMenuOpen ? "fg-menu" : "no-fg-menu",
     isInteractingWithChrome() ? "interacting" : "idle-controls",
     showOpening ? "opening" : "ready",
   ].join(":");

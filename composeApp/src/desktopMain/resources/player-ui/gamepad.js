@@ -141,20 +141,86 @@
   // --- control-bar nav mode ------------------------------------------------
   // X puts a focus ring on the control bar and the d-pad walks it, instead of
   // seeking and changing volume. X again drops the ring and hides the bar.
+  // Up moves the ring to the header buttons (video settings, frame generation,
+  // fullscreen, ...) and Down brings it back to the bar.
   // The bar re-applies its ring from focusedActionCommand on every render, so
-  // that is cleared while nav mode is off and restored on the next X.
+  // that is cleared while the ring is off the bar and restored when it returns.
   let navLastCommand = "";
+  let navZone = "bar";
+  let navHeaderId = "";
+
+  const headerButtons = () =>
+    Array.from(document.querySelectorAll(".header-actions .header-button"))
+      .filter(button => !button.hidden && !button.disabled &&
+        (button.offsetWidth > 0 || button.offsetHeight > 0) &&
+        window.getComputedStyle(button).display !== "none" &&
+        window.getComputedStyle(button).visibility !== "hidden");
+
+  const clearHeaderFocus = () => {
+    document.querySelectorAll(".header-actions .header-button.focused")
+      .forEach(button => button.classList.remove("focused"));
+  };
+
+  const setHeaderFocus = button => {
+    if (!button) return false;
+    clearHeaderFocus();
+    navHeaderId = button.id || "";
+    button.classList.add("focused");
+    button.focus({ preventScroll: true });
+    return true;
+  };
+
+  const currentHeaderButton = () => {
+    const buttons = headerButtons();
+    return buttons.find(button => button.classList.contains("focused")) ||
+      buttons.find(button => button.id && button.id === navHeaderId) ||
+      buttons[0] || null;
+  };
+
+  const focusBar = () => {
+    navZone = "bar";
+    clearHeaderFocus();
+    if (navLastCommand && !focusedActionCommand) focusedActionCommand = navLastCommand;
+    return ensureActionFocus({ focus: true });
+  };
+
+  const focusHeader = () => {
+    const target = currentHeaderButton();
+    if (!target) return false;
+    navLastCommand = focusedActionCommand || navLastCommand;
+    focusedActionCommand = "";
+    document.querySelectorAll(".action-pill .action.focused")
+      .forEach(button => button.classList.remove("focused"));
+    navZone = "header";
+    return setHeaderFocus(target);
+  };
+
+  // Put the ring back where it was, e.g. after a menu opened from it closes.
+  const restoreNavFocus = () => {
+    if (navZone === "header" && focusHeader()) return;
+    focusBar();
+  };
+
+  const moveHeaderFocus = delta => {
+    const buttons = headerButtons();
+    if (!buttons.length) return focusBar();
+    const current = buttons.find(button => button.classList.contains("focused"));
+    const index = current ? buttons.indexOf(current) : -1;
+    const next = index < 0 ? 0 : Math.max(0, Math.min(buttons.length - 1, index + delta));
+    return setHeaderFocus(buttons[next]);
+  };
+
   const setNavMode = (on, { hide = false } = {}) => {
     navMode = on;
     if (on) {
       wakeControls();
-      if (navLastCommand && !focusedActionCommand) focusedActionCommand = navLastCommand;
-      ensureActionFocus({ focus: true });
+      restoreNavFocus();
     } else {
       navLastCommand = focusedActionCommand || navLastCommand;
       focusedActionCommand = "";
       document.querySelectorAll(".action-pill .action.focused")
         .forEach(button => button.classList.remove("focused"));
+      clearHeaderFocus();
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       if (hide) setChromeVisibleFromKeyboard(false);
       else focusShortcutRoot();
@@ -278,6 +344,18 @@
       else if (name === "A") sendKey("Escape", "Escape");
       return;
     }
+    // The frame-generation dropdown: the d-pad walks its options, A picks,
+    // B (or X) closes it and leaves the ring on its button.
+    if (isFrameGenMenuOpen()) {
+      wakeControls();
+      switch (name) {
+        case "UP": moveFrameGenMenuFocus(-1); return;
+        case "DOWN": moveFrameGenMenuFocus(1); return;
+        case "A": case "START": activateFrameGenMenuFocus(); if (navMode) restoreNavFocus(); return;
+        case "B": case "BACK": case "X": closeFrameGenMenu(); if (navMode) restoreNavFocus(); return;
+        default: return;
+      }
+    }
     const menuOpen = Boolean(activeModal) || isPartyConfirmOpen();
     // Second X: hide the bar without waking it first.
     if (name === "X" && !rb && !menuOpen && navMode) {
@@ -290,7 +368,7 @@
       switch (name) {
         case "UP": case "DOWN": case "LEFT": case "RIGHT": menuDirection(name); return;
         case "A": case "START": menuActivate(); return;
-        case "B": case "BACK": sendKey("Escape", "Escape"); if (navMode) window.setTimeout(() => ensureActionFocus({ focus: true }), 120); return;
+        case "B": case "BACK": sendKey("Escape", "Escape"); if (navMode) window.setTimeout(restoreNavFocus, 120); return;
         case "Y": sendKey(rb ? "KeyA" : "KeyS", rb ? "a" : "s"); return;
         case "X": if (rb) sendKey("Backquote", "`"); return;
         default: return;
@@ -299,17 +377,24 @@
 
     switch (name) {
       case "UP":
-        if (navMode) return;
+        if (navMode) {
+          if (navZone !== "header") focusHeader();
+          return;
+        }
         gamepadVolume(1, repeat);
         return;
       case "DOWN":
-        if (navMode) return;
+        if (navMode) {
+          if (navZone === "header") focusBar();
+          return;
+        }
         gamepadVolume(-1, repeat);
         return;
       case "LEFT":
       case "RIGHT":
         if (navMode) {
-          moveActionFocus(name === "LEFT" ? -1 : 1);
+          if (navZone === "header") moveHeaderFocus(name === "LEFT" ? -1 : 1);
+          else moveActionFocus(name === "LEFT" ? -1 : 1);
           return;
         }
         playerSeek(SEEK_BUTTONS[name]);
@@ -326,9 +411,11 @@
           return;
         }
         if (navMode) {
-          const focused = document.querySelector(".action-pill .action.focused");
+          const focused = navZone === "header"
+            ? headerButtons().find(button => button.classList.contains("focused"))
+            : document.querySelector(".action-pill .action.focused");
           if (focused) focused.click();
-          else ensureActionFocus({ focus: true });
+          else restoreNavFocus();
           return;
         }
         requestPlaybackState("setPlaybackStateQuiet", true);
