@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import com.nuvio.app.core.input.AppNavigationBridge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -444,6 +445,15 @@ internal fun MainAppContent(
             }
             AppScreenTab.Library -> libraryScrollToTopRequests.tryEmit(Unit)
             AppScreenTab.Settings -> settingsRootActionRequests.tryEmit(Unit)
+        }
+    }
+
+    // Reload requests from input outside the Compose tree (the desktop gamepad's LB+RS).
+    LaunchedEffect(Unit) {
+        AppNavigationBridge.reloadRequests.collect {
+            val enabledAddons = AddonRepository.uiState.value.addons.enabledAddons()
+            HomeCatalogSettingsRepository.syncCatalogs(enabledAddons)
+            HomeRepository.refresh(enabledAddons)
         }
     }
 
@@ -1417,6 +1427,15 @@ internal fun MainAppContent(
 
                 PlatformEscapeShortcut(navigateBack)
 
+                // LB/RB step through the root tabs (wrapping), only while the tabs are showing;
+                // pushed screens register their own bumper handlers (seasons, filters).
+                fun cycleRootTab(delta: Int): Boolean {
+                    if (currentRoute != null && currentRoute !is TabsRoute) return false
+                    val tabs = AppScreenTab.entries
+                    val index = tabs.indexOf(selectedTab).coerceAtLeast(0)
+                    activateTab(tabs[(index + delta).mod(tabs.size)])
+                    return true
+                }
                 ControllerNavigationHost(
                     currentRoute = currentRoute,
                     selectedTab = selectedTab,
@@ -1424,32 +1443,26 @@ internal fun MainAppContent(
                         navigateBack()
                         true
                     },
-                    onBumperLeft = {
-                        if (currentRoute is TabsRoute) {
-                            val tabs = AppScreenTab.entries
-                            activateTab(tabs[(selectedTab.ordinal - 1 + tabs.size) % tabs.size])
-                            true
-                        } else {
-                            false
+                    onBumperLeft = { cycleRootTab(-1) },
+                    onBumperRight = { cycleRootTab(1) },
+                    // Y on Home/Library ("Search" in the hint bar): jump to the Search tab and
+                    // put the controller on its text field, ready to type.
+                    onActionY = onActionY@{
+                        if (currentRoute != null && currentRoute !is TabsRoute) return@onActionY false
+                        if (selectedTab != AppScreenTab.Home && selectedTab != AppScreenTab.Library) {
+                            return@onActionY false
                         }
-                    },
-                    onBumperRight = {
-                        if (currentRoute is TabsRoute) {
-                            val tabs = AppScreenTab.entries
-                            activateTab(tabs[(selectedTab.ordinal + 1) % tabs.size])
-                            true
-                        } else {
-                            false
+                        activateTab(AppScreenTab.Search)
+                        searchFocusRequestCount++
+                        coroutineScope.launch {
+                            // The tab switch restores remembered focus ~240ms later; land after it.
+                            delay(300)
+                            repeat(10) {
+                                if (ControllerFocusEngine.focusVisibleTextInput()) return@launch
+                                delay(50)
+                            }
                         }
-                    },
-                    onSearch = {
-                        if (currentRoute is TabsRoute) {
-                            activateTab(AppScreenTab.Search)
-                            searchFocusRequestCount++
-                            true
-                        } else {
-                            false
-                        }
+                        true
                     },
                     onOpenNavigation = {
                         ControllerFocusEngine.setNavigationZoneExpanded(true)

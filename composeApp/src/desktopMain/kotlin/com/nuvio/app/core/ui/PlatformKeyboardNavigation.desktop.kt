@@ -12,6 +12,8 @@ import com.nuvio.app.controller.ControllerFocusEngine
 import com.nuvio.app.controller.ControllerManager
 import com.nuvio.app.controller.ControllerScreenType
 import com.nuvio.app.controller.DesktopControllerInput
+import com.nuvio.app.features.gamepad.SyntheticKeyEvent
+import com.nuvio.app.core.ui.find.FindInPage
 import com.nuvio.app.controller.XboxButton
 import com.nuvio.app.controller.audio.ControllerSoundPlayer
 import com.nuvio.app.controller.audio.DesktopControllerSound
@@ -148,6 +150,30 @@ actual fun PlatformKeyboardNavigationHost() {
 
     DesktopKeyboardShortcutHost()
 
+    // The engine handles controller events on the polling thread, but Compose focus may only change
+    // on the AWT event thread (otherwise Compose aborts with "multithreaded access to
+    // SnapshotStateObserver").
+    DisposableEffect(focusManager) {
+        ControllerFocusEngine.clearComposeFocus = {
+            val clear = { focusManager.clearFocus(force = true) }
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) clear()
+            else javax.swing.SwingUtilities.invokeLater(clear)
+        }
+        ControllerFocusEngine.uiThreadRunner = { block ->
+            if (javax.swing.SwingUtilities.isEventDispatchThread()) {
+                block()
+            } else {
+                var result = false
+                javax.swing.SwingUtilities.invokeAndWait { result = block() }
+                result
+            }
+        }
+        onDispose {
+            ControllerFocusEngine.clearComposeFocus = null
+            ControllerFocusEngine.uiThreadRunner = null
+        }
+    }
+
     // Controller polling + navigation feedback sounds. DesktopControllerInput normalises XInput
     // (Windows) and SDL2 (Linux/macOS) into the same spatial-engine events.
     DisposableEffect(Unit) {
@@ -207,12 +233,13 @@ actual fun PlatformKeyboardNavigationHost() {
             when (event) {
                 is ControllerEvent.Navigate -> {
                     ControllerManager.notifyNavigationInput()
-                    val padMoved = activeFocusManager().moveSpatialFocus(event.direction)
-                    if (padMoved) {
+                    val moved = activeFocusManager().moveSpatialFocus(event.direction)
+                    if (moved) {
                         ControllerSoundPlayer.playNavigate()
                     } else if (event.direction == ControllerDirection.Up || event.direction == ControllerDirection.Down) {
                         ControllerFocusEngine.scrollActivePage(down = event.direction == ControllerDirection.Down)
                     }
+                    ControllerFocusEngine.onComposeNavigationResult(event.direction, moved)
                 }
                 is ControllerEvent.ButtonPressed -> when (event.button) {
                     XboxButton.A -> {
@@ -235,6 +262,11 @@ actual fun PlatformKeyboardNavigationHost() {
     DisposableEffect(Unit) {
         val dispatcher = java.awt.KeyEventDispatcher { event: KeyEvent ->
             if (event.id != KeyEvent.KEY_PRESSED) return@KeyEventDispatcher false
+            // Keys the controller's on-screen keyboard types (caret arrows, Enter) edit the field;
+            // they are not navigation.
+            if (event is SyntheticKeyEvent) return@KeyEventDispatcher false
+            // Arrow keys in the find bar move its caret, not app focus.
+            if (FindInPage.isFieldFocused) return@KeyEventDispatcher false
 
             val isPlayerActive = ControllerManager.screenContext.value.screenType ==
                 ControllerScreenType.Player
@@ -310,11 +342,13 @@ actual fun PlatformKeyboardNavigationHost() {
             // directional focus search. When focus cannot move further but the page has more
             // content, scroll it a page so navigation keeps going to the end of the list.
             ControllerManager.notifyNavigationInput()
-            if (activeFocusManager().moveSpatialFocus(direction)) {
+            val moved = activeFocusManager().moveSpatialFocus(direction)
+            if (moved) {
                 ControllerSoundPlayer.playNavigate()
             } else if (direction == ControllerDirection.Up || direction == ControllerDirection.Down) {
                 ControllerFocusEngine.scrollActivePage(down = direction == ControllerDirection.Down)
             }
+            ControllerFocusEngine.onComposeNavigationResult(direction, moved)
             true
         }
         java.awt.KeyboardFocusManager.getCurrentKeyboardFocusManager()

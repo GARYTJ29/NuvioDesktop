@@ -12,6 +12,7 @@ actual object AppFeaturePolicy {
     actual val p2pEnabled: Boolean = true
     actual val externalPlayerSupported: Boolean = true
     actual val trailerPlaybackMode: TrailerPlaybackMode = TrailerPlaybackMode.IN_APP
+    actual val youTubeStreamPlaybackMode: TrailerPlaybackMode = trailerPlaybackMode
     actual val heroTrailerPlaybackSupported: Boolean = false
     actual val inAppUpdaterEnabled: Boolean = false
     actual val imdbRatingLogoEnabled: Boolean = true

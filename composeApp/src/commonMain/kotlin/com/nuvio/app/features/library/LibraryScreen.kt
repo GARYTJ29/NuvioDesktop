@@ -22,7 +22,12 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import com.nuvio.app.controller.controllerStop
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -326,6 +331,11 @@ fun LibraryScreen(
             }
         }
 
+        // The header is sticky: its controller stops are only offered near the top of the list,
+        // or they would catch Up from deep in the shelves below.
+        val headerReachable by remember(listState) {
+            derivedStateOf { listState.firstVisibleItemIndex <= 1 }
+        }
         NuvioScreen(
             modifier = Modifier.fillMaxSize(),
             horizontalPadding = 0.dp,
@@ -362,9 +372,14 @@ fun LibraryScreen(
                             },
                             modifier = Modifier.padding(horizontal = 16.dp),
                             topPadding = topChromePadding,
+                            controllerGroupKey = LibraryHeaderGroupKey,
+                            controllerEnabled = headerReachable,
                             actions = {
                                 if (sourceMode == LibraryViewMode.Saved) {
-                                    LibraryListManagementButton()
+                                    LibraryListManagementButton(
+                                        controllerGroupKey = LibraryHeaderGroupKey,
+                                        controllerEnabled = headerReachable,
+                                    )
                                     val targetLayout = if (displaySettings.layoutMode == LibraryLayoutMode.HORIZONTAL) {
                                         LibraryLayoutMode.VERTICAL
                                     } else {
@@ -374,6 +389,14 @@ fun LibraryScreen(
                                         onClick = {
                                             LibraryDisplaySettingsRepository.setLayoutMode(targetLayout)
                                         },
+                                        modifier = Modifier.controllerStop(
+                                            id = "${LibraryHeaderGroupKey}_layout",
+                                            groupKey = LibraryHeaderGroupKey,
+                                            enabled = headerReachable,
+                                            shape = CircleShape,
+                                            selectLabel = "Layout",
+                                            onSelect = { LibraryDisplaySettingsRepository.setLayoutMode(targetLayout) },
+                                        ),
                                     ) {
                                         Crossfade(
                                             targetState = targetLayout,
@@ -397,7 +420,17 @@ fun LibraryScreen(
                                     }
                                 }
                                 if (onDownloadsClick != null) {
-                                    LibraryDownloadsButton(onClick = onDownloadsClick)
+                                    LibraryDownloadsButton(
+                                        onClick = onDownloadsClick,
+                                        modifier = Modifier.controllerStop(
+                                            id = "${LibraryHeaderGroupKey}_downloads",
+                                            groupKey = LibraryHeaderGroupKey,
+                                            enabled = headerReachable,
+                                            shape = CircleShape,
+                                            selectLabel = "Downloads",
+                                            onSelect = onDownloadsClick,
+                                        ),
+                                    )
                                 }
                             },
                         )
@@ -407,6 +440,7 @@ fun LibraryScreen(
                             onModeSelected = { mode ->
                                 sourceModeName = mode.name
                             },
+                            controllerEnabled = headerReachable,
                             modifier = Modifier.padding(horizontal = 16.dp),
                         )
                         Spacer(modifier = Modifier.height(6.dp))
@@ -727,10 +761,27 @@ private fun CloudLibrarySearchField(
     onQueryChange: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val fieldFocusRequester = remember { FocusRequester() }
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .controllerStop(
+                id = "cloud_library_search",
+                groupKey = "cloud_library_search",
+                isTextInput = true,
+                shape = RoundedCornerShape(12.dp),
+                selectLabel = "Type",
+                secondaryActionLabel = if (query.isNotEmpty()) "Clear" else null,
+                onSecondaryAction = if (query.isNotEmpty()) {
+                    { onQueryChange("") }
+                } else {
+                    null
+                },
+                onSelect = { fieldFocusRequester.requestFocus() },
+            )
+            .focusRequester(fieldFocusRequester),
         singleLine = true,
         shape = RoundedCornerShape(12.dp),
         placeholder = { Text(stringResource(Res.string.cloud_library_search_label)) },
@@ -764,12 +815,17 @@ private fun LazyListScope.cloudLibrarySkeletonItems() {
     }
 }
 
+private const val LibraryHeaderGroupKey = "library_header_actions"
+private const val LibrarySourceGroupKey = "library_source_switch"
+private const val CloudToolbarGroupKey = "cloud_toolbar"
+
 @Composable
 private fun LibrarySourceSwitch(
     selectedMode: LibraryViewMode,
     showServers: Boolean,
     onModeSelected: (LibraryViewMode) -> Unit,
     modifier: Modifier = Modifier,
+    controllerEnabled: Boolean = true,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -779,17 +835,23 @@ private fun LibrarySourceSwitch(
             label = stringResource(Res.string.library_source_saved),
             selected = selectedMode == LibraryViewMode.Saved,
             onClick = { onModeSelected(LibraryViewMode.Saved) },
+            controllerFocusId = "library_source_saved",
+            controllerEnabled = controllerEnabled,
         )
         LibraryChip(
             label = stringResource(Res.string.library_source_cloud),
             selected = selectedMode == LibraryViewMode.Cloud,
             onClick = { onModeSelected(LibraryViewMode.Cloud) },
+            controllerFocusId = "library_source_cloud",
+            controllerEnabled = controllerEnabled,
         )
         if (showServers) {
             LibraryChip(
                 label = stringResource(Res.string.library_source_servers),
                 selected = selectedMode == LibraryViewMode.Servers,
                 onClick = { onModeSelected(LibraryViewMode.Servers) },
+                controllerFocusId = "library_source_servers",
+                controllerEnabled = controllerEnabled,
             )
         }
     }
@@ -860,6 +922,8 @@ private fun CloudLibraryToolbar(
                     onSelected = { option ->
                         onProviderSelected(option.key.ifBlank { null })
                     },
+                    controllerFocusId = "cloud_toolbar_provider",
+                    controllerGroupKey = CloudToolbarGroupKey,
                 )
                 NuvioDropdownChip(
                     title = stringResource(Res.string.cloud_library_select_type),
@@ -873,9 +937,20 @@ private fun CloudLibraryToolbar(
                             ?.let(CloudLibraryItemType::valueOf)
                         onTypeSelected(type)
                     },
+                    controllerFocusId = "cloud_toolbar_type",
+                    controllerGroupKey = CloudToolbarGroupKey,
                 )
             }
-            IconButton(onClick = onRefresh) {
+            IconButton(
+                onClick = onRefresh,
+                modifier = Modifier.controllerStop(
+                    id = "cloud_toolbar_refresh",
+                    groupKey = CloudToolbarGroupKey,
+                    shape = CircleShape,
+                    selectLabel = "Refresh",
+                    onSelect = onRefresh,
+                ),
+            ) {
                 Icon(
                     imageVector = Icons.Rounded.Refresh,
                     contentDescription = stringResource(Res.string.cloud_library_refresh),
@@ -893,10 +968,20 @@ private fun LibraryChip(
     loading: Boolean = false,
     error: Boolean = false,
     onClick: () -> Unit,
+    controllerFocusId: String? = null,
+    controllerEnabled: Boolean = true,
 ) {
     val colorScheme = MaterialTheme.colorScheme
     Surface(
         modifier = Modifier
+            .controllerStop(
+                id = controllerFocusId,
+                groupKey = LibrarySourceGroupKey,
+                enabled = controllerEnabled,
+                shape = RoundedCornerShape(18.dp),
+                selectLabel = label,
+                onSelect = onClick,
+            )
             .clip(RoundedCornerShape(18.dp))
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(18.dp),
@@ -932,6 +1017,13 @@ private fun CloudLibraryRow(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 6.dp)
+            .controllerStop(
+                id = "cloud_item_${item.stableKey}",
+                enabled = playableCount > 0,
+                shape = MaterialTheme.shapes.medium,
+                selectLabel = "Play",
+                onSelect = onClick,
+            )
             .clickable(enabled = playableCount > 0, onClick = onClick),
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -1020,7 +1112,16 @@ private fun CloudLibraryFilePicker(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                IconButton(onClick = onBack) {
+                IconButton(
+                    onClick = onBack,
+                    modifier = Modifier.controllerStop(
+                        id = "cloud_file_picker_back",
+                        groupKey = "cloud_file_picker_back",
+                        shape = CircleShape,
+                        selectLabel = "Back",
+                        onSelect = onBack,
+                    ),
+                ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
                         contentDescription = stringResource(Res.string.action_back),
@@ -1060,10 +1161,11 @@ private fun CloudLibraryFilePicker(
                     )
                 }
             } else {
-                files.forEach { file ->
+                files.forEachIndexed { index, file ->
                     CloudLibraryFileRow(
                         file = file,
                         onClick = { onFileSelected(file) },
+                        controllerFocusId = "cloud_file_$index",
                     )
                 }
             }
@@ -1076,10 +1178,17 @@ private fun CloudLibraryFileRow(
     file: CloudLibraryFile,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    controllerFocusId: String? = null,
 ) {
     Surface(
         modifier = modifier
             .fillMaxWidth()
+            .controllerStop(
+                id = controllerFocusId,
+                shape = RoundedCornerShape(8.dp),
+                selectLabel = "Play",
+                onSelect = onClick,
+            )
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(8.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.58f),

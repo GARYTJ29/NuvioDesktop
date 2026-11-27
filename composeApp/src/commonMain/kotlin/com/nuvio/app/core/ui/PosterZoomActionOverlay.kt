@@ -6,6 +6,10 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import com.nuvio.app.controller.ControllerFocusZone
+import com.nuvio.app.controller.RegisterControllerHandler
+import com.nuvio.app.controller.controllerFocusable
+import com.nuvio.app.controller.isControllerNodeFocused
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,11 +63,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.max
 import androidx.compose.ui.unit.min
 import coil3.compose.AsyncImage
-import com.nuvio.app.controller.ControllerFocusEngine
-import com.nuvio.app.controller.ControllerFocusZone
-import com.nuvio.app.controller.ControllerManager
-import com.nuvio.app.controller.RegisterControllerHandler
-import com.nuvio.app.controller.controllerFocusable
 import dev.chrisbanes.haze.HazeInputScale
 import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeEffect
@@ -110,10 +109,13 @@ object PosterZoomOverlayCoordinator {
 
     fun show() {
         isVisible = true
+        // The menu is modal for the controller too: nothing behind it may be moved or pressed.
+        com.nuvio.app.controller.ControllerFocusEngine.onModalOverlayVisibilityChanged(true)
     }
 
     fun hide() {
         isVisible = false
+        com.nuvio.app.controller.ControllerFocusEngine.onModalOverlayVisibilityChanged(false)
     }
 }
 
@@ -208,14 +210,6 @@ fun NuvioPosterZoomActionOverlay(
         }
     }
 
-    // The preview menu is a spatial overlay (Overlay zone) even when it opens on a Compose-driven
-    // route (details). Let the engine drive it while it is visible, then restore the route mode.
-    DisposableEffect(Unit) {
-        val previous = ControllerFocusEngine.deferNavigationToCompose
-        ControllerFocusEngine.deferNavigationToCompose = false
-        onDispose { ControllerFocusEngine.deferNavigationToCompose = previous }
-    }
-
     DisposableEffect(source) {
         onDispose { source?.land() }
     }
@@ -265,27 +259,23 @@ fun NuvioPosterZoomActionOverlay(
         }
     }
 
-    // B closes the preview: the engine routes gamepad back through the global handler stack,
-    // so the Compose back handler above alone is not enough.
-    RegisterControllerHandler(
-        key = "poster_zoom_actions",
-        onBack = {
-            scope.launch { close() }
-            true
-        },
-    )
-
-    // When the preview is opened with the controller/keyboard, select its first action so A
-    // works immediately instead of leaving the ring behind on the poster.
-    LaunchedEffect(Unit) {
-        if (!ControllerManager.isNavigationActive.value) return@LaunchedEffect
-        delay(140)
-        ControllerFocusEngine.requestFocus("poster_action_0", triggerScroll = false)
-    }
-
     PlatformBackHandler(enabled = true) {
         close()
     }
+    // B on a controller: the spatial engine routes it to its handler stack, not to the
+    // platform back handler, while focus sits on the menu rows.
+    RegisterControllerHandler(
+        key = "poster_zoom_overlay",
+        onBack = {
+            close()
+            true
+        },
+        // Tabs, search and options belong to the screen underneath; keep them off while the menu is up.
+        onBumperLeft = { true },
+        onBumperRight = { true },
+        onActionX = { true },
+        onActionY = { true },
+    )
 
     BoxWithConstraints(
         modifier = modifier
@@ -408,7 +398,8 @@ fun NuvioPosterZoomActionOverlay(
                     }
                     PosterZoomMenuRow(
                         action = action,
-                        index = index,
+                        controllerId = "poster_zoom_action_$index",
+                        isDefaultFocus = index == 0,
                         enabled = phase == PosterZoomPhase.Open,
                         onSelected = { select(action) },
                         modifier = Modifier.graphicsLayer {
@@ -548,24 +539,29 @@ fun NuvioPosterZoomActionOverlay(
 @Composable
 private fun PosterZoomMenuRow(
     action: PosterZoomOverlayAction,
-    index: Int,
+    controllerId: String,
+    isDefaultFocus: Boolean,
     enabled: Boolean,
     onSelected: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val tokens = MaterialTheme.nuvio
     val contentColor = if (action.isDestructive) tokens.colors.danger else tokens.colors.textPrimary
+    // The menu card clips its rows, so a controller-focused row is highlighted instead of ringed.
+    val controllerFocused = isControllerNodeFocused(controllerId)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(enabled = enabled, onClick = onSelected)
             .controllerFocusable(
-                id = "poster_action_$index",
+                id = controllerId,
                 zone = ControllerFocusZone.Overlay,
-                groupKey = "poster_actions",
-                selectLabel = action.label,
+                enabled = enabled,
+                isDefaultFocus = isDefaultFocus,
+                hideFocusRing = true,
                 onSelect = onSelected,
             )
+            .background(if (controllerFocused) tokens.colors.textPrimary.copy(alpha = 0.14f) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onSelected)
             .padding(horizontal = NuvioTokens.Space.s18, vertical = NuvioTokens.Space.s16),
         horizontalArrangement = Arrangement.spacedBy(NuvioTokens.Space.s12),
         verticalAlignment = Alignment.CenterVertically,

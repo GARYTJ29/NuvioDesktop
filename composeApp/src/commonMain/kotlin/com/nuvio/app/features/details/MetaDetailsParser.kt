@@ -328,7 +328,8 @@ internal object MetaDetailsParser {
             val url = obj.string("url")
             val infoHash = obj.string("infoHash")
             val externalUrl = obj.string("externalUrl")
-            if (url == null && infoHash == null && externalUrl == null) return@mapNotNull null
+            val ytId = obj.string("ytId")?.trim()?.takeIf { it.isNotEmpty() }
+            if (url == null && infoHash == null && externalUrl == null && ytId == null) return@mapNotNull null
 
             val hintsObj = obj["behaviorHints"] as? JsonObject
             val proxyHeaders = hintsObj
@@ -345,6 +346,7 @@ internal object MetaDetailsParser {
                 infoHash = infoHash,
                 fileIdx = obj.int("fileIdx"),
                 externalUrl = externalUrl,
+                ytId = ytId,
                 addonName = addonName,
                 addonId = "embedded",
                 streamType = normalizeStreamType(obj.string("type")),

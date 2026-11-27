@@ -35,6 +35,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nuvio.app.core.ui.NuvioActionLabel
+import com.nuvio.app.core.ui.findableItems
 import com.nuvio.app.core.ui.NuvioLoadingIndicator
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.features.addons.AddonRepository
@@ -334,10 +335,13 @@ private fun HomescreenCatalogList(
     }
 
     SettingsGroup(isTablet = isTablet) {
+        // Rows are composed on demand; this lets Ctrl+F find catalogs scrolled far out of view.
+        val findableTexts = remember(items) { items.map { "${it.displayTitle} ${it.addonName}" } }
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(max = if (isTablet) 900.dp else 680.dp),
+                .heightIn(max = if (isTablet) 900.dp else 680.dp)
+                .findableItems(lazyListState, findableTexts),
             state = lazyListState,
         ) {
             itemsIndexed(items, key = { _, item -> item.key }) { index, item ->

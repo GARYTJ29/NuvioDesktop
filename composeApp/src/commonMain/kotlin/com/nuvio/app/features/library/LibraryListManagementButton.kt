@@ -1,6 +1,9 @@
 package com.nuvio.app.features.library
 
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.Modifier
+import com.nuvio.app.controller.controllerStop
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -22,7 +25,10 @@ import nuvio.composeapp.generated.resources.library_create_list
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
-internal fun LibraryListManagementButton() {
+internal fun LibraryListManagementButton(
+    controllerGroupKey: String? = null,
+    controllerEnabled: Boolean = true,
+) {
     val profile by ProfileRepository.state.collectAsStateWithLifecycle()
     val connections by TrackingProviderRegistry.connectedProviderIds.collectAsStateWithLifecycle()
     val library by LibraryRepository.uiState.collectAsStateWithLifecycle()
@@ -34,7 +40,17 @@ internal fun LibraryListManagementButton() {
     if (context == null) return
     val provider = context.source.providerId?.let(TrackingProviderRegistry::libraryProvider) ?: return
     val manager = provider.listManager ?: return
-    IconButton(onClick = controller::create) {
+    IconButton(
+        onClick = controller::create,
+        modifier = Modifier.controllerStop(
+            id = controllerGroupKey?.let { "${it}_create_list" },
+            groupKey = controllerGroupKey,
+            enabled = controllerEnabled,
+            shape = CircleShape,
+            selectLabel = "New list",
+            onSelect = controller::create,
+        ),
+    ) {
         Icon(
             imageVector = Icons.Rounded.Add,
             contentDescription = stringResource(Res.string.library_create_list),

@@ -53,6 +53,13 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 import com.nuvio.app.controller.audio.ControllerSoundPlayer
 import com.nuvio.app.core.ui.LocalScreenActive
 import com.nuvio.app.core.ui.nuvio
@@ -107,6 +114,8 @@ internal class ControllerFocusNode(
     var onMoveDown: (() -> Boolean)? = null,
     var onMoveLeft: (() -> Boolean)? = null,
     var onMoveRight: (() -> Boolean)? = null,
+    /** Puts Compose focus on this node's element; true when it took it. */
+    var requestComposeFocus: (() -> Boolean)? = null,
     var rowLazyListState: LazyListState? = null,
     var rowItemIndex: Int = -1,
     var rowTotalCount: Int = 0,
@@ -189,6 +198,164 @@ object ControllerFocusEngine {
      * ring across off-screen poster nodes.
      */
     var deferNavigationToCompose: Boolean = false
+
+    /**
+     * True after the engine ran out of nodes in a direction and handed focus to Compose, so the
+     * controls it does not know about (hero buttons, the search field, Discover and filter chips,
+     * continue-watching cards) are reachable. Directions and A then go to the Compose focus bridge
+     * until Compose focus lands on an engine node again, which takes it back.
+     */
+    var composeOwnsFocus: Boolean = false
+        private set
+    private var yieldedFromId: String? = null
+    private var yieldedAt: TimeMark? = null
+    private var awaitingFirstComposeMove = false
+
+    private fun resetComposeHandoff() {
+        composeOwnsFocus = false
+        yieldedFromId = null
+        yieldedAt = null
+        awaitingFirstComposeMove = false
+    }
+
+    /**
+     * Hands focus to Compose at [current], so the bridge's directional search continues from there.
+     * Returns false (and changes nothing) when the node cannot take Compose focus.
+     */
+    private fun yieldToCompose(current: ControllerFocusNode): Boolean {
+        val request = current.requestComposeFocus ?: return false
+        // Controller events arrive on the polling thread; Compose focus must change on the UI thread.
+        if (!runCatching { runOnUiThreadBlocking { request() } }.getOrDefault(false)) return false
+        composeOwnsFocus = true
+        yieldedFromId = current.id
+        yieldedAt = TimeSource.Monotonic.markNow()
+        awaitingFirstComposeMove = true
+        _focusedNodeId.value = null
+        _focusedNodeSnapshot.value = null
+        return true
+    }
+
+    /** Engine node whose element currently holds Compose focus, if any. */
+    private var composeFocusedNodeId: String? = null
+
+    /**
+     * Set by the platform focus bridge: clears Compose focus (FocusManager.clearFocus). The bridge
+     * must post it to the UI thread itself, since the engine may call it from the controller thread.
+     */
+    var clearComposeFocus: (() -> Unit)? = null
+
+    /**
+     * Set by the platform: runs a block on the UI thread and returns its result, waiting when called
+     * from another thread (controller events are handled on the controller polling thread). Unset,
+     * the block runs on the calling thread.
+     */
+    var uiThreadRunner: ((() -> Boolean) -> Boolean)? = null
+
+    private fun runOnUiThreadBlocking(block: () -> Boolean): Boolean =
+        uiThreadRunner?.invoke(block) ?: block()
+
+    /**
+     * Drops Compose focus once the engine drives focus again. Left in place, it kept the sidebar
+     * expanded (it opens while Compose focus is inside it) and, after a route change, made the
+     * Compose bridge move focus around the hidden previous screen instead of the new one.
+     */
+    private fun dropComposeFocus() {
+        composeFocusedNodeId = null
+        runCatching { clearComposeFocus?.invoke() }
+    }
+
+    internal fun hasActiveOverlay(): Boolean =
+        modalOverlayOpen || nodes.values.any { it.zone == ControllerFocusZone.Overlay && it.isVisibleAndValid }
+
+    /**
+     * True while a modal overlay (the poster/episode options menu) is open, whether or not its rows
+     * are laid out yet. Its rows only count as engine overlay stops once they have bounds, which
+     * they lack while the menu animates in; until then directions reached the screen behind.
+     */
+    private var modalOverlayOpen = false
+    private var composeFocusBeforeModal: String? = null
+
+    /** Called by the overlay's coordinator when a modal overlay opens or closes (UI thread). */
+    fun onModalOverlayVisibilityChanged(open: Boolean) {
+        if (modalOverlayOpen == open) return
+        modalOverlayOpen = open
+        if (!deferNavigationToCompose) {
+            composeFocusBeforeModal = null
+            return
+        }
+        if (open) {
+            // On Compose-driven routes the background keeps Compose focus (the episode card the
+            // menu was opened from); take it away so nothing behind the menu can be moved or pressed.
+            composeFocusBeforeModal = composeFocusedNodeId
+            val current = _focusedNodeId.value?.let { nodes[it] }
+            if (current == null || current.zone != ControllerFocusZone.Overlay) {
+                _focusedNodeId.value = null
+                _focusedNodeSnapshot.value = null
+            }
+            dropComposeFocus()
+        } else {
+            // Put Compose focus back on the element the menu was opened from.
+            val restoreId = composeFocusBeforeModal
+            composeFocusBeforeModal = null
+            val request = restoreId?.let { nodes[it] }?.takeIf { it.isVisibleAndValid }?.requestComposeFocus
+            if (request != null) runCatching { runOnUiThreadBlocking { request() } }
+        }
+    }
+
+    /**
+     * On routes Compose drives (details, streams, settings) Compose focus is the selection. The
+     * engine only follows it, so the ring, the focus scale and X (Options) apply to the element the
+     * d-pad actually reached. Before, the engine focused whichever node composed (episode cards as
+     * the row scrolled), and its ring, drawn in preference to Compose's, stayed stuck on that card.
+     */
+    private fun mirrorComposeFocus(node: ControllerFocusNode, focused: Boolean) {
+        if (hasActiveOverlay()) return
+        if (focused) {
+            if (!node.isVisibleAndValid || _focusedNodeId.value == node.id) return
+            _focusedNodeId.value = node.id
+            _focusedNodeSnapshot.value = node.toSnapshot()
+            lastFocusedByZone[node.zone] = node.id
+        } else if (_focusedNodeId.value == node.id) {
+            _focusedNodeId.value = null
+            _focusedNodeSnapshot.value = null
+        }
+    }
+
+    /** Compose focus moved to or from an engine node's element. */
+    internal fun onComposeFocusChanged(node: ControllerFocusNode, focused: Boolean) {
+        if (focused) {
+            composeFocusedNodeId = node.id
+        } else if (composeFocusedNodeId == node.id) {
+            composeFocusedNodeId = null
+        }
+        if (deferNavigationToCompose) {
+            mirrorComposeFocus(node, focused)
+            return
+        }
+        if (!focused || !composeOwnsFocus || !node.isVisibleAndValid) return
+        // The hand-off itself focuses the node it left from; that is not a return to it.
+        val sinceYield = yieldedAt?.elapsedNow()
+        if (node.id == yieldedFromId && sinceYield != null && sinceYield < 150.milliseconds) return
+        hasUserNavigatedOnCurrentRoute = true
+        focusNodeInternal(node, triggerScroll = false)
+    }
+
+    /**
+     * Reported by the Compose focus bridge after it handled a direction while Compose owns focus.
+     * When the very first move after a hand-off finds nothing either, the engine takes focus back
+     * and does what it did before hand-offs existed (Up opens the sidebar).
+     */
+    fun onComposeNavigationResult(direction: ControllerDirection, moved: Boolean) {
+        if (!composeOwnsFocus) return
+        if (moved) {
+            awaitingFirstComposeMove = false
+            return
+        }
+        if (!awaitingFirstComposeMove) return
+        val origin = yieldedFromId?.let { nodes[it] }?.takeIf { it.isVisibleAndValid } ?: return
+        focusNodeInternal(origin, triggerScroll = false)
+        if (direction == ControllerDirection.Up) focusNavigationZoneFrom(origin)
+    }
 
     private val _routeGeneration = MutableStateFlow(0)
     /** Increments on every route/tab change; used to re-seed Compose focus for the new screen. */
@@ -390,6 +557,10 @@ object ControllerFocusEngine {
         val newRouteStr = routeKey?.toString()
         val routeChanged = activeRouteKey != null && activeRouteKey != newRouteStr
         if (routeChanged) {
+            // Compose focus left on the previous screen (still composed under the new one) would
+            // catch the Compose bridge's moves there instead of the new screen being seeded.
+            if (composeOwnsFocus || composeFocusedNodeId != null) dropComposeFocus()
+            resetComposeHandoff()
             saveCurrentRouteFocusMemory()
             _routeGeneration.value = _routeGeneration.value + 1
         }
@@ -494,6 +665,12 @@ object ControllerFocusEngine {
             return
         }
 
+        // Compose drives this route; the engine only mirrors Compose focus (mirrorComposeFocus).
+        if (deferNavigationToCompose) {
+            if (currentId == node.id) _focusedNodeSnapshot.value = node.toSnapshot()
+            return
+        }
+
         val pendingId = pendingRestoredNodeId
         if (pendingId != null) {
             if (node.id == pendingId && node.isVisibleAndValid) {
@@ -510,6 +687,11 @@ object ControllerFocusEngine {
             }
             if (System.currentTimeMillis() - pendingRestoredAt < PENDING_RESTORE_TIMEOUT_MS) return
         }
+
+        // Compose holds focus on purpose; nodes composing or moving must not pull it back.
+        if (composeOwnsFocus) return
+
+        if (restoreRebuiltFocus(node)) return
 
         if (currentId == node.id) {
             _focusedNodeSnapshot.value = node.toSnapshot()
@@ -557,11 +739,46 @@ object ControllerFocusEngine {
         }
     }
 
+    /**
+     * A focused stop that left composition, kept for a moment in case it comes straight back: list
+     * items that are rebuilt (their key changed, or the items above them came or went) dispose and
+     * recreate their stops under the same id. Without this, focus fell to the nearest other stop
+     * and stayed there. Also covers the stop an overlay (dropdown menu) should return to.
+     */
+    private var rebuildingFocusId: String? = null
+    private var rebuildingSince: TimeMark? = null
+    private var rebuildFallbackId: String? = null
+
+    /** Puts focus back on a stop that was just rebuilt, while nothing else claimed focus since. */
+    private fun restoreRebuiltFocus(node: ControllerFocusNode): Boolean {
+        val wanted = rebuildingFocusId ?: return false
+        val since = rebuildingSince
+        if (since == null || since.elapsedNow() > 500.milliseconds) {
+            rebuildingFocusId = null
+            return false
+        }
+        if (node.id != wanted || !node.isVisibleAndValid || composeOwnsFocus) return false
+        rebuildingFocusId = null
+        if (_focusedNodeId.value != rebuildFallbackId) return false
+        isInternalCleanupFocus = true
+        try {
+            focusNodeInternal(node, triggerScroll = false)
+        } finally {
+            isInternalCleanupFocus = false
+        }
+        return true
+    }
+
     internal fun removeNode(id: String) {
         val removed = nodes.remove(id)
         if (_focusedNodeId.value == id) {
             _focusedNodeId.value = null
             _focusedNodeSnapshot.value = null
+            val wantedBack = if (removed?.zone == ControllerFocusZone.Overlay) {
+                lastFocusedByZone[ControllerFocusZone.Content]
+            } else {
+                id
+            }
             isInternalCleanupFocus = true
             try {
                 // If an overlay just closed, restore Content focus unless Navigation focus is actively selected
@@ -573,6 +790,14 @@ object ControllerFocusEngine {
                     }
                     val currentNav = _focusedNodeId.value?.let { nodes[it] }?.takeIf { it.isVisibleAndValid }
                     if (currentNav?.zone == ControllerFocusZone.Navigation) {
+                        return
+                    }
+                    // Compose drives this route: go back to mirroring the Compose-focused element.
+                    if (deferNavigationToCompose) {
+                        composeFocusedNodeId?.let { nodes[it] }?.takeIf { it.isVisibleAndValid }?.let { held ->
+                            _focusedNodeId.value = held.id
+                            _focusedNodeSnapshot.value = held.toSnapshot()
+                        }
                         return
                     }
                     val restoredContentId = lastFocusedByZone[ControllerFocusZone.Content]
@@ -587,9 +812,31 @@ object ControllerFocusEngine {
                 }
             } finally {
                 isInternalCleanupFocus = false
+                if (wantedBack != null && _focusedNodeId.value != wantedBack) {
+                    rebuildingFocusId = wantedBack
+                    rebuildingSince = TimeSource.Monotonic.markNow()
+                    rebuildFallbackId = _focusedNodeId.value
+                }
             }
         }
         updateInteractiveContentStatus()
+    }
+
+    /**
+     * Focuses the first visible text input (e.g. the search field) and activates it, as Y does.
+     * Returns false when no text input is on screen.
+     */
+    fun focusVisibleTextInput(): Boolean {
+        val textInputNode = nodes.values.firstOrNull { it.isTextInput && it.isVisibleAndValid } ?: return false
+        ControllerSoundPlayer.playSelect()
+        pendingRestoreFallbackJob?.cancel()
+        pendingRestoredNodeId = null
+        hasUserNavigatedOnCurrentRoute = true
+        if (_focusedNodeId.value != textInputNode.id) {
+            focusNodeInternal(textInputNode, triggerScroll = true)
+        }
+        textInputNode.onSelect()
+        return true
     }
 
     /**
@@ -662,6 +909,18 @@ object ControllerFocusEngine {
                 focusNodeInternal(target, triggerScroll = false)
                 return true
             }
+        }
+
+        if (composeOwnsFocus) return false
+
+        // Compose drives this route: no engine focus of its own (it mirrors Compose focus instead).
+        if (deferNavigationToCompose) {
+            val current = _focusedNodeId.value?.let { nodes[it] }
+            if (current == null || !current.isVisibleAndValid || current.id != composeFocusedNodeId) {
+                _focusedNodeId.value = null
+                _focusedNodeSnapshot.value = null
+            }
+            return false
         }
 
         if (pendingRestoredNodeId != null) {
@@ -770,6 +1029,17 @@ object ControllerFocusEngine {
             return
         }
         val previousId = _focusedNodeId.value
+        analogScrolledSinceFocus = false
+        // The engine takes over: Compose focus on any other element is stale now. Not on routes
+        // Compose drives (details, streams, settings): there Compose focus is the real selection,
+        // and the engine still tracks nodes (episode cards) as they compose while the row scrolls.
+        val composeHeldId = composeFocusedNodeId
+        if (!deferNavigationToCompose &&
+            ((composeHeldId != null && composeHeldId != node.id) || (composeOwnsFocus && composeHeldId == null))
+        ) {
+            dropComposeFocus()
+        }
+        resetComposeHandoff()
         _focusedNodeId.value = node.id
         _focusedNodeSnapshot.value = node.toSnapshot()
         if (!isInternalCleanupFocus) {
@@ -1142,19 +1412,8 @@ object ControllerFocusEngine {
         val candidates = row.nodes.filter { !it.id.startsWith("view_all_pill_") }
         if (candidates.isEmpty()) return null
 
-        if (!row.groupKey.isNullOrEmpty()) {
-            val rememberedId = lastFocusedByGroup[row.groupKey]
-            if (rememberedId != null) {
-                val rememberedNode = candidates.firstOrNull { it.id == rememberedId }
-                if (rememberedNode != null) return rememberedNode
-            }
-        }
-
-        if (current.rowItemIndex >= 0) {
-            val matchingIndexNode = candidates.firstOrNull { it.rowItemIndex == current.rowItemIndex }
-            if (matchingIndexNode != null) return matchingIndexNode
-        }
-
+        // Move straight up/down: pick the card visually closest on the X axis, ignoring
+        // which card was last focused in that row or its item index.
         val currentCenterX = current.boundsInRoot.center.x
         return candidates.minByOrNull { abs(it.boundsInRoot.center.x - currentCenterX) }
     }
@@ -1335,10 +1594,47 @@ object ControllerFocusEngine {
 
         // Routes without engine nodes belong to Compose: let the focus bridge move/activate the
         // Compose-focused element instead of dragging the spatial ring over hidden posters.
-        if (deferNavigationToCompose) {
+        // A modal overlay is open but its rows are not laid out yet (opening animation): swallow
+        // movement and A, so they neither reach the screen behind nor act on its focused item.
+        if (modalOverlayOpen && overlayNodes.isEmpty()) {
+            when (event) {
+                is ControllerEvent.Navigate -> return true
+                is ControllerEvent.ButtonPressed -> when (event.button) {
+                    XboxButton.A,
+                    XboxButton.X,
+                    XboxButton.DPadUp,
+                    XboxButton.DPadDown,
+                    XboxButton.DPadLeft,
+                    XboxButton.DPadRight,
+                    -> return true
+                    else -> Unit
+                }
+                else -> Unit
+            }
+        }
+
+        // An open overlay (episode options, poster actions) is an engine stop even on these routes.
+        if (deferNavigationToCompose && !hasActiveOverlay()) {
             when (event) {
                 is ControllerEvent.Navigate -> return false
                 is ControllerEvent.ButtonPressed -> if (event.button == XboxButton.A) return false
+                else -> Unit
+            }
+        }
+
+        // Compose holds focus on a control the engine does not know: it moves and activates it.
+        if (composeOwnsFocus && overlayNodes.isEmpty()) {
+            when (event) {
+                is ControllerEvent.Navigate -> return false
+                is ControllerEvent.ButtonPressed -> when (event.button) {
+                    XboxButton.A,
+                    XboxButton.DPadUp,
+                    XboxButton.DPadDown,
+                    XboxButton.DPadLeft,
+                    XboxButton.DPadRight,
+                    -> return false
+                    else -> Unit
+                }
                 else -> Unit
             }
         }
@@ -1347,8 +1643,59 @@ object ControllerFocusEngine {
             is ControllerEvent.Navigate -> handleNavigate(event.direction)
             is ControllerEvent.ButtonPressed -> handleButtonPressed(event.button)
             is ControllerEvent.ButtonReleased -> false
-            is ControllerEvent.AnalogScroll -> handleAnalogScroll(event.dx, event.dy)
+            is ControllerEvent.AnalogScroll -> handleAnalogScroll(event.dx, event.dy).also { scrolled ->
+                if (scrolled) analogScrolledSinceFocus = true
+            }
         }
+    }
+
+    /**
+     * Set when the right stick scrolls the page and cleared whenever focus moves. While set, the
+     * focused item may have been scrolled out of view, and the next press should pick up from what
+     * is on screen instead of scrolling back to it.
+     */
+    private var analogScrolledSinceFocus = false
+
+    private fun ControllerFocusNode.isMostlyOnScreen(): Boolean {
+        if (!isVisibleAndValid) return false
+        val full = if (unclippedBoundsInRoot.height > 2f) unclippedBoundsInRoot else return true
+        val heightShown = boundsInRoot.height >= full.height * 0.6f
+        val widthShown = full.width <= 2f || boundsInRoot.width >= full.width * 0.6f
+        return heightShown && widthShown
+    }
+
+    /**
+     * After the right stick scrolled the focused item out of view, moves focus to the on-screen
+     * item nearest to it and reports true; the press that triggered this only lands focus there.
+     * Reports false when focus is still in view or there is nothing to land on.
+     */
+    private fun relandAfterAnalogScroll(): Boolean {
+        if (!analogScrolledSinceFocus) return false
+        analogScrolledSinceFocus = false
+        if (nodes.values.any { it.zone == ControllerFocusZone.Overlay && it.isVisibleAndValid }) return false
+        val current = _focusedNodeId.value?.let { nodes[it] }
+        if (current != null && current.zone != ControllerFocusZone.Content) return false
+        if (current != null && current.isMostlyOnScreen()) return false
+        val candidates = nodes.values.filter { it.zone == ControllerFocusZone.Content && it.isMostlyOnScreen() }
+        if (candidates.isEmpty()) return false
+        val anchor = current?.let {
+            if (it.unclippedBoundsInRoot.height > 2f) it.unclippedBoundsInRoot.center else it.boundsInRoot.center
+        }
+        val target = if (anchor != null) {
+            candidates.minBy {
+                hypot(
+                    (it.boundsInRoot.center.x - anchor.x).toDouble(),
+                    (it.boundsInRoot.center.y - anchor.y).toDouble(),
+                )
+            }
+        } else {
+            candidates.minWith(
+                compareBy<ControllerFocusNode> { (it.boundsInRoot.top / 32f).toInt() }
+                    .thenBy { it.boundsInRoot.left },
+            )
+        }
+        focusNodeInternal(target, triggerScroll = false)
+        return true
     }
 
     private fun handleAnalogScroll(dx: Float, dy: Float): Boolean {
@@ -1391,6 +1738,8 @@ object ControllerFocusEngine {
             XboxButton.DPadLeft -> handleNavigate(ControllerDirection.Left)
             XboxButton.DPadRight -> handleNavigate(ControllerDirection.Right)
             XboxButton.A -> {
+                // Focus the stick scrolled out of view lands on screen first; A then selects it.
+                if (relandAfterAnalogScroll()) return true
                 ControllerSoundPlayer.playSelect()
                 if (current == null) {
                     // Nothing spatially focused: seed the engine when possible, otherwise report the
@@ -1441,13 +1790,7 @@ object ControllerFocusEngine {
             XboxButton.Y -> {
                 // If a visible text input field exists on screen (e.g. search input field),
                 // pressing Y immediately focuses it and invokes the virtual keyboard without requiring 'A' press confirmation
-                val textInputNode = nodes.values.firstOrNull { it.isTextInput && it.isVisibleAndValid }
-                if (textInputNode != null) {
-                    ControllerSoundPlayer.playSelect()
-                    if (_focusedNodeId.value != textInputNode.id) {
-                        focusNodeInternal(textInputNode, triggerScroll = true)
-                    }
-                    textInputNode.onSelect()
+                if (focusVisibleTextInput()) {
                     true
                 } else {
                     val tertiary = current?.onTertiaryAction
@@ -1744,6 +2087,8 @@ object ControllerFocusEngine {
                 }
                 return true
             }
+            // Nothing further down for the engine: let Compose reach controls below the last row.
+            if (yieldToCompose(current)) return false
             return true
         } else if (direction == ControllerDirection.Up) {
             // The Home hero lives outside the shelf rows; focus it explicitly when the user moves
@@ -1818,20 +2163,26 @@ object ControllerFocusEngine {
                 return true
             }
 
-            val navNodes = nodes.values.filter { it.zone == ControllerFocusZone.Navigation && it.isVisibleAndValid }
-            if (navNodes.isNotEmpty()) {
-                val target = navNodes.firstOrNull { it.isDefaultFocus }
-                    ?: lastFocusedByZone[ControllerFocusZone.Navigation]?.let { id -> navNodes.firstOrNull { it.id == id } }
-                    ?: navNodes.minByOrNull { abs(it.boundsInRoot.center.x - current.boundsInRoot.center.x) }
-                if (target != null) {
-                    focusNodeInternal(target, triggerScroll = false, direction = direction)
-                    return true
-                }
-            }
+            // Top of the engine's rows. Controls above them that are not engine nodes (hero
+            // buttons, the search field, Discover type and filter chips) belong to Compose: hand
+            // focus over. When Compose has nothing above either, it hands back and the sidebar opens.
+            if (yieldToCompose(current)) return false
+            focusNavigationZoneFrom(current)
             return true
         }
 
         return false
+    }
+
+    private fun focusNavigationZoneFrom(current: ControllerFocusNode): Boolean {
+        val navNodes = nodes.values.filter { it.zone == ControllerFocusZone.Navigation && it.isVisibleAndValid }
+        if (navNodes.isEmpty()) return false
+        val target = navNodes.firstOrNull { it.isDefaultFocus }
+            ?: lastFocusedByZone[ControllerFocusZone.Navigation]?.let { id -> navNodes.firstOrNull { it.id == id } }
+            ?: navNodes.minByOrNull { abs(it.boundsInRoot.center.x - current.boundsInRoot.center.x) }
+            ?: return false
+        focusNodeInternal(target, triggerScroll = false, direction = ControllerDirection.Up)
+        return true
     }
 
     private fun handleNavigate(direction: ControllerDirection): Boolean {
@@ -1840,6 +2191,7 @@ object ControllerFocusEngine {
         if (PlatformVirtualKeyboard.isKeyboardActive) {
             PlatformVirtualKeyboard.hide()
         }
+        if (relandAfterAnalogScroll()) return true
         val overlayNodes = nodes.values.filter { it.zone == ControllerFocusZone.Overlay && it.isVisibleAndValid }
         val activeZone = if (overlayNodes.isNotEmpty()) {
             ControllerFocusZone.Overlay
@@ -2549,6 +2901,12 @@ fun Modifier.controllerFocusable(
         latestOnFocused?.invoke()
     }
 
+    // Lets the engine hand focus to Compose from this element (see ControllerFocusEngine.yieldToCompose),
+    // and take it back when Compose focus returns here. The requester targets the focusable the caller
+    // chains after this modifier (clickable, Surface onClick).
+    val composeFocusRequester = remember { FocusRequester() }
+    node.requestComposeFocus = { composeFocusRequester.requestFocus(FocusDirection.Enter) }
+
     DisposableEffect(effectiveId, effectiveEnabled) {
         if (effectiveEnabled) {
             ControllerFocusEngine.upsertNode(node)
@@ -2586,16 +2944,33 @@ fun Modifier.controllerFocusable(
         label = "controller_sibling_alpha",
     )
 
+    // The ring itself is drawn once, above everything, by FocusRingOverlay; the focused node only
+    // reports where it is. Its bounds are scaled the way its graphicsLayer scales it.
+    val ringOwner = remember { Any() }
+    val ringShape = shape ?: RoundedCornerShape(cornerRadius)
+    val showsRing = isFocused && !hideFocusRing
+    val latestShowsRing by rememberUpdatedState(showsRing)
+    val latestRingShape by rememberUpdatedState(ringShape)
+    fun reportRing(unclipped: Rect) {
+        if (unclipped.width <= 0f || unclipped.height <= 0f) return
+        val c = unclipped.center
+        val halfW = unclipped.width * effectiveFocusScale / 2f
+        val halfH = unclipped.height * effectiveFocusScale / 2f
+        FocusRingRegistry.reportEngine(
+            FocusRingTarget(ringOwner, Rect(c.x - halfW, c.y - halfH, c.x + halfW, c.y + halfH), latestRingShape),
+        )
+    }
+    LaunchedEffect(showsRing, ringShape) {
+        if (showsRing) reportRing(latestUnclippedBounds) else FocusRingRegistry.clearEngine(ringOwner)
+    }
+    DisposableEffect(ringOwner) {
+        onDispose { FocusRingRegistry.clearEngine(ringOwner) }
+    }
+
     val scale by animateFloatAsState(
         targetValue = if (isFocused) effectiveFocusScale else 1f,
         animationSpec = tween(durationMillis = 150),
         label = "controller_focus_scale",
-    )
-
-    val sheenProgress by animateFloatAsState(
-        targetValue = if (isFocused && !hideFocusRing) 1f else 0f,
-        animationSpec = tween(durationMillis = 180),
-        label = "controller_focus_sheen",
     )
 
     this
@@ -2613,6 +2988,7 @@ fun Modifier.controllerFocusable(
                 latestUnclippedBounds = unclippedBounds
                 node.boundsInRoot = bounds
                 node.unclippedBoundsInRoot = unclippedBounds
+                if (latestShowsRing) reportRing(unclippedBounds)
                 if (effectiveEnabled) {
                     ControllerFocusEngine.upsertNode(node)
                 }
@@ -2628,172 +3004,8 @@ fun Modifier.controllerFocusable(
                 alpha = animatedAlpha
             }
         }
-        .drawWithContent {
-            drawContent()
-            if (sheenProgress > 0.01f) {
-                val sheenShape = shape ?: RoundedCornerShape(cornerRadius)
-                val sheenPath = Path().apply {
-                    addOutline(sheenShape.createOutline(size, layoutDirection, this@drawWithContent))
-                }
-                clipPath(sheenPath) {
-                    // Subtle artwork brightening + diagonal specular sheen on cover
-                    drawRect(
-                        color = Color.White.copy(alpha = 0.065f * sheenProgress),
-                    )
-                    drawRect(
-                        brush = Brush.linearGradient(
-                            colorStops = arrayOf(
-                                0.0f to Color.White.copy(alpha = 0.20f * sheenProgress),
-                                0.28f to Color.White.copy(alpha = 0.08f * sheenProgress),
-                                0.55f to Color.Transparent,
-                                1.0f to Color.White.copy(alpha = 0.04f * sheenProgress),
-                            ),
-                            start = Offset.Zero,
-                            end = Offset(size.width, size.height),
-                        ),
-                    )
-                }
-            }
-            if (isFocused && !hideFocusRing) {
-                if (useHaloFocusRing) {
-                    // Play Button Halo / High-Contrast Focus Ring:
-                    // Rendered strictly OUTSIDE the button perimeter so it never encroaches into the white button fill or icon:
-                    // 1. Dark separation ring (1.5px solid #090A10) right at the button boundary
-                    // 2. Crisp white outline (1.5px solid #FFFFFF) offset outward by 1.5px
-                    // 3. Diffused outer white glow (rgba(255, 255, 255, 0.55)) fading outward
-                    // 4. Outer subtle drop shadow
-                    val sepStrokePx = 1.5f.dp.toPx()
-                    val whiteStrokePx = 1.5f.dp.toPx()
-                    val glowStrokePx = 3.5f.dp.toPx()
-                    val shadowStrokePx = 5.dp.toPx()
-
-                    val outlineOffsetPx = 1.5f.dp.toPx()
-                    val glowOffsetPx = 3.dp.toPx()
-                    val shadowOffsetPx = 5.5f.dp.toPx()
-
-                    if (shape != null) {
-                        // 1. Boundary separation ring
-                        drawOutline(
-                            outline = shape.createOutline(size, layoutDirection, this),
-                            color = Color(0xFF090A10),
-                            style = Stroke(width = sepStrokePx),
-                        )
-                        // 2. White outline offset outward
-                        translate(left = -outlineOffsetPx, top = -outlineOffsetPx) {
-                            val expandedSize = Size(size.width + outlineOffsetPx * 2, size.height + outlineOffsetPx * 2)
-                            drawOutline(
-                                outline = shape.createOutline(expandedSize, layoutDirection, this),
-                                color = Color.White,
-                                style = Stroke(width = whiteStrokePx),
-                            )
-                        }
-                        // 3. Diffused white glow
-                        translate(left = -glowOffsetPx, top = -glowOffsetPx) {
-                            val expandedSize = Size(size.width + glowOffsetPx * 2, size.height + glowOffsetPx * 2)
-                            drawOutline(
-                                outline = shape.createOutline(expandedSize, layoutDirection, this),
-                                color = Color.White.copy(alpha = 0.55f),
-                                style = Stroke(width = glowStrokePx),
-                            )
-                        }
-                        // 4. Subtle outer shadow
-                        translate(left = -shadowOffsetPx, top = -shadowOffsetPx) {
-                            val expandedSize = Size(size.width + shadowOffsetPx * 2, size.height + shadowOffsetPx * 2)
-                            drawOutline(
-                                outline = shape.createOutline(expandedSize, layoutDirection, this),
-                                color = Color.Black.copy(alpha = 0.50f),
-                                style = Stroke(width = shadowStrokePx),
-                            )
-                        }
-                    } else {
-                        val radiusPx = cornerRadius.toPx()
-                        // 1. Boundary separation ring
-                        drawRoundRect(
-                            color = Color(0xFF090A10),
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = CornerRadius(radiusPx, radiusPx),
-                            style = Stroke(width = sepStrokePx),
-                        )
-                        // 2. White outline offset outward
-                        drawRoundRect(
-                            color = Color.White,
-                            topLeft = Offset(-outlineOffsetPx, -outlineOffsetPx),
-                            size = Size(size.width + outlineOffsetPx * 2, size.height + outlineOffsetPx * 2),
-                            cornerRadius = CornerRadius(radiusPx + outlineOffsetPx, radiusPx + outlineOffsetPx),
-                            style = Stroke(width = whiteStrokePx),
-                        )
-                        // 3. Diffused white glow
-                        drawRoundRect(
-                            color = Color.White.copy(alpha = 0.55f),
-                            topLeft = Offset(-glowOffsetPx, -glowOffsetPx),
-                            size = Size(size.width + glowOffsetPx * 2, size.height + glowOffsetPx * 2),
-                            cornerRadius = CornerRadius(radiusPx + glowOffsetPx, radiusPx + glowOffsetPx),
-                            style = Stroke(width = glowStrokePx),
-                        )
-                        // 4. Subtle outer shadow
-                        drawRoundRect(
-                            color = Color.Black.copy(alpha = 0.50f),
-                            topLeft = Offset(-shadowOffsetPx, -shadowOffsetPx),
-                            size = Size(size.width + shadowOffsetPx * 2, size.height + shadowOffsetPx * 2),
-                            cornerRadius = CornerRadius(radiusPx + shadowOffsetPx, radiusPx + shadowOffsetPx),
-                            style = Stroke(width = shadowStrokePx),
-                        )
-                    }
-                } else {
-                    // Subtle Modern Focus Ring across all cards/elements:
-                    // 1. Subtle drop shadow
-                    // 2. Soft diffused white glow (rgba(255, 255, 255, 0.45))
-                    // 3. Sleek thinner 1.6dp white primary border
-                    val shadowStrokePx = 5.dp.toPx()
-                    val glowStrokePx = 3.5f.dp.toPx()
-                    val whiteBorderStrokePx = 1.6f.dp.toPx()
-
-                    if (shape != null) {
-                        val outline = shape.createOutline(size, layoutDirection, this)
-                        drawOutline(
-                            outline = outline,
-                            color = Color.Black.copy(alpha = 0.50f),
-                            style = Stroke(width = shadowStrokePx),
-                        )
-                        drawOutline(
-                            outline = outline,
-                            color = Color.White.copy(alpha = 0.45f),
-                            style = Stroke(width = glowStrokePx),
-                        )
-                        drawOutline(
-                            outline = outline,
-                            color = Color.White,
-                            style = Stroke(width = whiteBorderStrokePx),
-                        )
-                    } else {
-                        val radiusPx = cornerRadius.toPx()
-                        val cr = CornerRadius(radiusPx, radiusPx)
-                        drawRoundRect(
-                            color = Color.Black.copy(alpha = 0.50f),
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = cr,
-                            style = Stroke(width = shadowStrokePx),
-                        )
-                        drawRoundRect(
-                            color = Color.White.copy(alpha = 0.45f),
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = cr,
-                            style = Stroke(width = glowStrokePx),
-                        )
-                        drawRoundRect(
-                            color = Color.White,
-                            topLeft = Offset.Zero,
-                            size = size,
-                            cornerRadius = cr,
-                            style = Stroke(width = whiteBorderStrokePx),
-                        )
-                    }
-                }
-            }
-        }
+        .focusRequester(composeFocusRequester)
+        .onFocusChanged { state -> ControllerFocusEngine.onComposeFocusChanged(node, state.isFocused) }
 }
 
 /**

@@ -1025,6 +1025,18 @@ public:
         });
     }
 
+    // Runs a script in the controls page, e.g. a gamepad press read natively.
+    // Dropped until the page is ready: a press made while it loads has nothing
+    // to act on yet.
+    void executeScript(const std::string &script) {
+        if (script.empty()) return;
+        std::wstring wideScript = toWide(script);
+        postUiTask([self = shared_from_this(), wideScript]() {
+            if (self->shuttingDown.load() || !self->webView || !self->controlsWebReady.load()) return;
+            self->webView->ExecuteScript(wideScript.c_str(), nullptr);
+        });
+    }
+
     void beginWindowDrag() {
         if (!containerHwnd) return;
         HWND rootWindow = GetAncestor(containerHwnd, GA_ROOT);
@@ -1438,6 +1450,8 @@ private:
     std::mutex controlsMutex;
     std::string pendingControlsJson;
     double initialStartSeconds = 0.0;
+    // Set once thumbfast.lua was handed to mpv; hover previews are dropped otherwise.
+    bool thumbfastLoaded = false;
 
     friend LRESULT CALLBACK messageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     friend LRESULT CALLBACK containerWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -1827,6 +1841,8 @@ private:
                 setMpvOptionStringLocked("http-header-fields", headers.c_str());
             }
 
+            configureThumbfastLocked(sourceUrl);
+
             int initResult = api.initialize(mpv);
             if (initResult < 0) {
                 throw std::runtime_error(std::string("mpv_initialize failed: ") + api.errorText(initResult));
@@ -1963,6 +1979,20 @@ private:
             }
             setPaused(!shouldPlay);
             sendPlayerEvent(type, value);
+            return;
+        }
+        if (type == "seekHover") {
+            // value = hovered seconds; x/y = thumbnail bottom-centre in physical
+            // pixels of the video window (the controls page already scaled them).
+            showThumbfastPreview(
+                value,
+                extractJsonNumber(messageJson, L"x", -1.0),
+                extractJsonNumber(messageJson, L"y", -1.0)
+            );
+            return;
+        }
+        if (type == "seekLeave") {
+            clearThumbfastPreview();
             return;
         }
         if (type == "dragWindow") {
@@ -2125,6 +2155,68 @@ private:
 
     void setMpvOptionStringLocked(const char *name, const char *value) {
         (void)mpvApi().setOptionString(mpv, name, value);
+    }
+
+    static bool isYouTubeMediaUrl(const std::string &url) {
+        return url.find(".googlevideo.com/") != std::string::npos ||
+            url.find(".youtube.com/") != std::string::npos;
+    }
+
+    // Seek-bar hover thumbnails. thumbfast.lua runs inside this libmpv and spawns
+    // the bundled standalone mpv.exe to decode frames, which it draws back into
+    // this player with overlay-add. Both files ship next to player_bridge.dll.
+    // NUVIO_THUMBFAST=0 turns the feature off. YouTube streams skip it: the thumbnailer
+    // would open YouTube's HLS master playlist a second time, which is slow to start.
+    void configureThumbfastLocked(const std::string &sourceUrl) {
+        thumbfastLoaded = false;
+        if (isYouTubeMediaUrl(sourceUrl)) return;
+        wchar_t toggle[8] = {};
+        DWORD toggleLength = GetEnvironmentVariableW(L"NUVIO_THUMBFAST", toggle, (DWORD)(sizeof(toggle) / sizeof(toggle[0])));
+        if (toggleLength > 0 && toggleLength < 8 && wcscmp(toggle, L"0") == 0) return;
+
+        std::wstring directory = moduleDirectory();
+        if (directory.empty()) return;
+        std::wstring script = directory + L"\\thumbfast.lua";
+        std::wstring thumbnailer = directory + L"\\mpv.exe";
+        if (GetFileAttributesW(script.c_str()) == INVALID_FILE_ATTRIBUTES ||
+            GetFileAttributesW(thumbnailer.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            return;
+        }
+
+        std::string scriptPath = toUtf8(script);
+        std::string thumbnailerPath = toUtf8(thumbnailer);
+        // config=no means thumbfast.conf is never read, so its settings go in as
+        // script-opts. %len% quoting keeps commas or '=' in the path intact.
+        std::string scriptOpts =
+            "thumbfast-mpv_path=%" + std::to_string(thumbnailerPath.size()) + "%" + thumbnailerPath +
+            ",thumbfast-network=yes"
+            ",thumbfast-hwdec=no"
+            ",thumbfast-max_width=160"
+            ",thumbfast-max_height=90";
+        if (mpvApi().setOptionString(mpv, "scripts", scriptPath.c_str()) < 0) return;
+        setMpvOptionStringLocked("script-opts", scriptOpts.c_str());
+        thumbfastLoaded = true;
+    }
+
+    void showThumbfastPreview(double seconds, double x, double y) {
+        if (!thumbfastLoaded || !(seconds >= 0.0) || x < 0.0 || y < 0.0) return;
+        std::string time = std::to_string(seconds);
+        std::string anchorX = std::to_string(std::llround(x));
+        std::string anchorY = std::to_string(std::llround(y));
+        const char *command[] = {
+            "script-message-to", "thumbfast", "thumb", time.c_str(), anchorX.c_str(), anchorY.c_str(), nullptr
+        };
+        std::lock_guard<std::mutex> lock(mpvMutex);
+        if (!mpv) return;
+        mpvApi().command(mpv, command);
+    }
+
+    void clearThumbfastPreview() {
+        if (!thumbfastLoaded) return;
+        const char *command[] = {"script-message-to", "thumbfast", "clear", nullptr};
+        std::lock_guard<std::mutex> lock(mpvMutex);
+        if (!mpv) return;
+        mpvApi().command(mpv, command);
     }
 
     double doubleProperty(const char *name, double fallback) {
@@ -2540,6 +2632,13 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_requestFocus(JNIEnv *, jobject, jlong handle) {
     auto player = playerFromHandle(handle);
     if (player) player->requestFocus();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_executeScript(JNIEnv *env, jobject, jlong handle, jstring script) {
+    auto player = playerFromHandle(handle);
+    std::string scriptText = jstringToUtf8(env, script);
+    if (player) player->executeScript(scriptText);
 }
 
 extern "C" JNIEXPORT void JNICALL

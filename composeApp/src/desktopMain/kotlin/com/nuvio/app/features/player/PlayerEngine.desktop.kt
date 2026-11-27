@@ -29,9 +29,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.nuvio.app.features.gamepad.GamepadRouter
+import com.nuvio.app.features.gamepad.PlayerGamepadHandler
 import com.nuvio.app.core.ui.AppPresenceState
 import com.nuvio.app.core.ui.LocalNuvioPlatformDensity
 import com.nuvio.app.core.ui.PresenceSnapshot
+import com.nuvio.app.features.player.desktop.ActiveDesktopPlayer
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerPictureInPicture
 import com.nuvio.app.features.player.desktop.NativePlayerController
@@ -211,6 +214,21 @@ private fun NativePlayerSurface(
             onScrubChange = { positionMs -> latestOnPlayerControlsScrubChange.value(positionMs) },
             onScrubFinished = { positionMs -> latestOnPlayerControlsScrubFinished.value(positionMs) },
         )
+    }
+
+    // While the player is up the pad drives the overlay instead of the app.
+    DisposableEffect(controller) {
+        val gamepadHandler = PlayerGamepadHandler(controller)
+        GamepadRouter.playerHandler = gamepadHandler
+        ActiveDesktopPlayer.controller = controller
+        onDispose {
+            if (GamepadRouter.playerHandler === gamepadHandler) GamepadRouter.playerHandler = null
+            if (ActiveDesktopPlayer.controller === controller) ActiveDesktopPlayer.controller = null
+        }
+    }
+    val gamepadConnected by GamepadRouter.connected.collectAsState()
+    LaunchedEffect(controller, gamepadConnected) {
+        (GamepadRouter.playerHandler as? PlayerGamepadHandler)?.setActive(gamepadConnected)
     }
 
     DisposableEffect(controller, sourceAvailable, sourceUrl, playbackHeaders) {

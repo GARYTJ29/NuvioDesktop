@@ -35,7 +35,7 @@ fun ControllerNavigationHost(
     onBack: () -> Boolean,
     onBumperLeft: (() -> Boolean)? = null,
     onBumperRight: (() -> Boolean)? = null,
-    onSearch: (() -> Boolean)? = null,
+    onActionY: (() -> Boolean)? = null,
     onOpenNavigation: (() -> Boolean)? = null,
 ) {
     val routeIdentity = when (currentRoute) {
@@ -131,7 +131,7 @@ fun ControllerNavigationHost(
         onBack = onBack,
         onBumperLeft = onBumperLeft,
         onBumperRight = onBumperRight,
-        onActionY = onSearch,
+        onActionY = onActionY,
         onMenuButton = onOpenNavigation,
     )
 }
@@ -140,6 +140,7 @@ fun ControllerNavigationHost(
 @Composable
 fun BoxScope.ControllerMainOverlay(currentRoute: AppRoute?) {
     if (currentRoute !is PlayerRoute) {
+        FocusRingOverlay()
         ControllerHintToolbar(
             modifier = Modifier
                 .align(Alignment.BottomEnd)

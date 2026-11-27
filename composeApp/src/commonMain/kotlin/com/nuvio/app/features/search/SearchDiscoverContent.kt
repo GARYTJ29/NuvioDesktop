@@ -43,10 +43,13 @@ internal fun LazyListScope.discoverContent(
     onPosterClick: ((MetaPreview) -> Unit)? = null,
     onPosterLongClick: ((MetaPreview) -> Unit)? = null,
 ) {
-    item {
+    // Stable keys: the recent-searches block above comes and goes as the controller moves in and
+    // out of it, and index-keyed items would be torn down and rebuilt on that shift, dropping the
+    // controller's selection (Down from the last recent search bounced back to the field).
+    item(key = "discover_header") {
         DiscoverSectionHeader(modifier = Modifier.padding(horizontal = 16.dp))
     }
-    item {
+    item(key = "discover_filters") {
         DiscoverFilterRow(
             state = state,
             modifier = Modifier.padding(horizontal = 16.dp),
@@ -56,7 +59,7 @@ internal fun LazyListScope.discoverContent(
         )
     }
     state.selectedCatalog?.let { selectedCatalog ->
-        item {
+        item(key = "discover_catalog_context") {
             Text(
                 text = stringResource(
                     Res.string.discover_catalog_context,
@@ -75,7 +78,7 @@ internal fun LazyListScope.discoverContent(
 
     when {
         (state.isLoading || isSourceLoading) && state.items.isEmpty() -> {
-            items(2) {
+            items(2, key = { "discover_skeleton_$it" }) {
                 PosterGridSkeletonRow(
                     columns = columns,
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -84,7 +87,7 @@ internal fun LazyListScope.discoverContent(
         }
 
         state.items.isEmpty() -> {
-            item {
+            item(key = "discover_empty") {
                 DiscoverEmptyStateCard(
                     reason = state.emptyStateReason,
                     errorMessage = state.errorMessage,
@@ -96,7 +99,10 @@ internal fun LazyListScope.discoverContent(
         }
 
         else -> {
-            items(count = (state.items.size + columns - 1) / columns) { rowIndex ->
+            items(
+                count = (state.items.size + columns - 1) / columns,
+                key = { rowIndex -> "discover_row_$rowIndex" },
+            ) { rowIndex ->
                 val firstIndex = rowIndex * columns
                 PosterGridRow(
                     items = state.items.subList(firstIndex, minOf(firstIndex + columns, state.items.size)),
@@ -109,7 +115,7 @@ internal fun LazyListScope.discoverContent(
                 )
             }
             if (state.isLoading) {
-                item {
+                item(key = "discover_loading_more") {
                     CatalogLoadingFooter(
                         modifier = Modifier.padding(horizontal = 16.dp),
                     )
@@ -128,6 +134,8 @@ private fun DiscoverSectionHeader(modifier: Modifier = Modifier) {
         color = MaterialTheme.colorScheme.onBackground,
     )
 }
+
+private const val DiscoverFilterGroupKey = "discover_filters"
 
 @Composable
 private fun DiscoverFilterRow(
@@ -148,6 +156,8 @@ private fun DiscoverFilterRow(
             options = state.typeOptions.map { NuvioDropdownOption(key = it, label = it.displayTypeLabel()) },
             enabled = state.typeOptions.isNotEmpty(),
             onSelected = { onTypeSelected(it.key) },
+            controllerFocusId = "discover_filter_type",
+            controllerGroupKey = DiscoverFilterGroupKey,
         )
         NuvioDropdownChip(
             title = stringResource(Res.string.discover_select_catalog),
@@ -156,6 +166,8 @@ private fun DiscoverFilterRow(
             options = state.catalogOptions.map { option -> NuvioDropdownOption(key = option.key, label = option.catalogName) },
             enabled = state.catalogOptions.isNotEmpty(),
             onSelected = { onCatalogSelected(it.key) },
+            controllerFocusId = "discover_filter_catalog",
+            controllerGroupKey = DiscoverFilterGroupKey,
         )
 
         val selectedCatalog = state.selectedCatalog
@@ -174,6 +186,8 @@ private fun DiscoverFilterRow(
             onSelected = { option ->
                 onGenreSelected(option.key.ifBlank { null })
             },
+            controllerFocusId = "discover_filter_genre",
+            controllerGroupKey = DiscoverFilterGroupKey,
         )
     }
 }

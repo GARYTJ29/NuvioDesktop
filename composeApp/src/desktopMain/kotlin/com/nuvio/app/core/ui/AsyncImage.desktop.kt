@@ -2,7 +2,7 @@ package com.nuvio.app.core.ui
 
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
+import com.nuvio.app.core.input.collectIsPointerHoveredAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
@@ -76,7 +76,7 @@ internal actual fun NuvioAsyncImage(
     // Hover tracking only exists for On hover, so the common case pays nothing for it.
     val hoverSource = remember { MutableInteractionSource() }
     val hovered: State<Boolean> =
-        if (desktopAnimation == NuvioDesktopAnimation.OnHover) hoverSource.collectIsHoveredAsState() else NeverHovered
+        if (desktopAnimation == NuvioDesktopAnimation.OnHover) hoverSource.collectIsPointerHoveredAsState() else NeverHovered
     val playing: () -> Boolean = when (desktopAnimation) {
         NuvioDesktopAnimation.Always -> AlwaysPlaying
         NuvioDesktopAnimation.OnHover -> remember(hovered) { { hovered.value } }

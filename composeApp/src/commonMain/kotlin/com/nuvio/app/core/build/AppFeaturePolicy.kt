@@ -17,6 +17,9 @@ expect object AppFeaturePolicy {
     val p2pEnabled: Boolean
     val externalPlayerSupported: Boolean
     val trailerPlaybackMode: TrailerPlaybackMode
+
+    /** How addon streams that only carry a YouTube id play; independent of trailer playback. */
+    val youTubeStreamPlaybackMode: TrailerPlaybackMode
     val heroTrailerPlaybackSupported: Boolean
     val inAppUpdaterEnabled: Boolean
     val imdbRatingLogoEnabled: Boolean

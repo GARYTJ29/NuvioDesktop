@@ -47,6 +47,9 @@ import nuvio.composeapp.generated.resources.library_sort_released_asc
 import nuvio.composeapp.generated.resources.library_sort_released_desc
 import org.jetbrains.compose.resources.stringResource
 
+private const val LibraryFiltersGroupKey = "library_filters"
+private const val LibraryFacetsGroupKey = "library_facets"
+
 @Composable
 internal fun LibrarySavedControls(
     layoutMode: LibraryLayoutMode,
@@ -86,6 +89,8 @@ internal fun LibrarySavedControls(
                     },
                     enabled = verticalProjection.availableSections.size > 1,
                     onSelected = { option -> onSectionSelected(option.key) },
+                    controllerFocusId = "library_filter_list",
+                    controllerGroupKey = LibraryFiltersGroupKey,
                 )
             }
 
@@ -110,6 +115,8 @@ internal fun LibrarySavedControls(
                     options = typeOptions,
                     enabled = typeOptions.size > 1,
                     onSelected = { option -> onTypeSelected(option.key.ifBlank { null }) },
+                    controllerFocusId = "library_filter_type",
+                    controllerGroupKey = LibraryFiltersGroupKey,
                 )
             }
 
@@ -126,6 +133,8 @@ internal fun LibrarySavedControls(
                         .firstOrNull { it.name == option.key }
                         ?.let(onSortSelected)
                 },
+                controllerFocusId = "library_filter_sort",
+                controllerGroupKey = LibraryFiltersGroupKey,
             )
         }
 
@@ -141,6 +150,8 @@ internal fun LibrarySavedControls(
                             options = libraryFacetOptions(allLabel, verticalProjection.availableGenres),
                             onSelected = { option -> onGenreSelected(option.key.ifBlank { null }) },
                             fillWidth = true,
+                            controllerFocusId = "library_facet_genre",
+                            controllerGroupKey = LibraryFacetsGroupKey,
                         )
                     }
                 }
@@ -154,6 +165,8 @@ internal fun LibrarySavedControls(
                             options = libraryFacetOptions(allLabel, verticalProjection.availableYears),
                             onSelected = { option -> onYearSelected(option.key.ifBlank { null }) },
                             fillWidth = true,
+                            controllerFocusId = "library_facet_year",
+                            controllerGroupKey = LibraryFacetsGroupKey,
                         )
                     }
                 }
@@ -172,6 +185,8 @@ internal fun LibrarySavedControls(
                                 ?.let(onWatchedFilterSelected)
                         },
                         fillWidth = true,
+                        controllerFocusId = "library_facet_watched",
+                        controllerGroupKey = LibraryFacetsGroupKey,
                     )
                 }
             }
