@@ -49,6 +49,7 @@ typedef enum mpv_format {
 typedef enum mpv_event_id {
     MPV_EVENT_NONE = 0,
     MPV_EVENT_SHUTDOWN = 1,
+    MPV_EVENT_LOG_MESSAGE = 2,
     MPV_EVENT_VIDEO_RECONFIG = 17,
 } mpv_event_id;
 
@@ -58,6 +59,13 @@ typedef struct mpv_event {
     uint64_t reply_userdata;
     void *data;
 } mpv_event;
+
+typedef struct mpv_event_log_message {
+    const char *prefix;
+    const char *level;
+    const char *text;
+    int log_level;
+} mpv_event_log_message;
 }
 
 namespace {
@@ -515,6 +523,107 @@ bool unifiedMemoryGpu() {
     return unified;
 }
 
+// ---- DLSS frame generation (libmpv's vf_dlssfg + nuvio_fg.dll) ----
+// The filter, its bridge (nuvio_fg.dll) and NVIDIA's runtime (nvngx_dlssg.dll)
+// ship next to this DLL. Frame generation is offered only when both files are
+// there and the machine has an NVIDIA GPU; whether DLSS-G actually runs (RTX
+// 40+, driver, HAGS) is reported by the filter once it starts.
+constexpr uint32_t kNvidiaVendorId = 0x10DE;
+constexpr int kMaxFrameGenerationMultiplier = 4;
+
+// Multiplier the next player starts with (0 = off), set from Kotlin.
+std::atomic<int> gFrameGenerationPreference{0};
+
+int clampFrameGenerationMultiplier(int multiplier) {
+    if (multiplier < 2) return 0;
+    return std::min(multiplier, kMaxFrameGenerationMultiplier);
+}
+
+std::wstring frameGenerationBridgePath() {
+    std::wstring directory = moduleDirectory();
+    return directory.empty() ? std::wstring() : directory + L"\\nuvio_fg.dll";
+}
+
+bool fileExists(const std::wstring &path) {
+    if (path.empty()) return false;
+    DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+struct DxgiAdapterInfo {
+    bool primaryIsNvidia = false;
+    bool anyNvidia = false;
+};
+
+DxgiAdapterInfo dxgiAdapterInfo() {
+    static const DxgiAdapterInfo info = []() {
+        DxgiAdapterInfo result;
+        // The default device sits on adapter 0, which is what mpv picks
+        // without d3d11-adapter; its factory lists the others.
+        ComPtr<ID3D11Device> device;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr))) {
+            return result;
+        }
+        ComPtr<IDXGIDevice> dxgiDevice;
+        ComPtr<IDXGIAdapter> primary;
+        if (FAILED(device.As(&dxgiDevice)) || FAILED(dxgiDevice->GetAdapter(&primary))) {
+            return result;
+        }
+        DXGI_ADAPTER_DESC primaryDesc = {};
+        if (SUCCEEDED(primary->GetDesc(&primaryDesc))) {
+            result.primaryIsNvidia = primaryDesc.VendorId == kNvidiaVendorId;
+        }
+        result.anyNvidia = result.primaryIsNvidia;
+        ComPtr<IDXGIFactory1> factory;
+        if (SUCCEEDED(primary->GetParent(IID_PPV_ARGS(&factory)))) {
+            ComPtr<IDXGIAdapter1> adapter;
+            for (UINT index = 0; factory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND; index++) {
+                DXGI_ADAPTER_DESC1 desc = {};
+                if (SUCCEEDED(adapter->GetDesc1(&desc)) && desc.VendorId == kNvidiaVendorId) {
+                    result.anyNvidia = true;
+                }
+                adapter.Reset();
+            }
+        }
+        return result;
+    }();
+    return info;
+}
+
+std::wstring executableDirectory() {
+    wchar_t buffer[MAX_PATH] = {};
+    DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return std::wstring();
+    std::wstring path(buffer, buffer + length);
+    size_t separator = path.find_last_of(L"\\/");
+    return separator == std::wstring::npos ? std::wstring() : path.substr(0, separator);
+}
+
+// Folder holding NVIDIA's nvngx_dlssg.dll, or empty when it isn't installed.
+// It is not bundled in the app jar: scripts\build.bat copies it next to
+// NuvioDesktop.exe, while this DLL runs from the extracted runtime cache.
+// A copy next to this DLL (a local build that dropped it into
+// native\windows\runtime) wins.
+std::wstring frameGenerationRuntimeDirectory() {
+    static const std::wstring directory = []() {
+        for (const std::wstring &candidate : {moduleDirectory(), executableDirectory()}) {
+            if (!candidate.empty() && fileExists(candidate + L"\\nvngx_dlssg.dll")) return candidate;
+        }
+        return std::wstring();
+    }();
+    return directory;
+}
+
+// Both DLLs present and an NVIDIA GPU: only then does the player show the FG button.
+bool frameGenerationAvailable() {
+    static const bool available = []() {
+        return fileExists(frameGenerationBridgePath()) &&
+            !frameGenerationRuntimeDirectory().empty() &&
+            dxgiAdapterInfo().anyNvidia;
+    }();
+    return available;
+}
+
 struct MpvApi {
     using mpv_create_fn = mpv_handle *(*)();
     using mpv_initialize_fn = int (*)(mpv_handle *);
@@ -529,6 +638,7 @@ struct MpvApi {
     using mpv_free_fn = void (*)(void *);
     using mpv_wait_event_fn = mpv_event *(*)(mpv_handle *, double);
     using mpv_wakeup_fn = void (*)(mpv_handle *);
+    using mpv_request_log_messages_fn = int (*)(mpv_handle *, const char *);
 
     HMODULE library = nullptr;
     std::once_flag loadOnce;
@@ -547,6 +657,7 @@ struct MpvApi {
     mpv_free_fn freeValue = nullptr;
     mpv_wait_event_fn waitEvent = nullptr;
     mpv_wakeup_fn wakeup = nullptr;
+    mpv_request_log_messages_fn requestLogMessages = nullptr;
 
     void ensureLoaded() {
         std::call_once(loadOnce, [this]() { load(); });
@@ -606,6 +717,7 @@ struct MpvApi {
         freeValue = loadSymbol<mpv_free_fn>("mpv_free");
         waitEvent = loadSymbol<mpv_wait_event_fn>("mpv_wait_event");
         wakeup = loadSymbol<mpv_wakeup_fn>("mpv_wakeup");
+        requestLogMessages = loadSymbol<mpv_request_log_messages_fn>("mpv_request_log_messages");
     }
 
     template <typename T>
@@ -1427,6 +1539,19 @@ private:
     bool rtxSuperResolution = false;
     bool rtxHdr = false;
     std::string appliedVideoFilter;
+    // Frame generation. fgMultiplier is what the user asked for (0 = off);
+    // fgActive is what the filter reported running (0 until it starts).
+    // fgStatus: "off" | "starting" | "on" | "failed".
+    std::mutex fgMutex;
+    bool fgAvailable = false;
+    int fgMultiplier = 0;
+    int fgActive = 0;
+    std::string fgStatus = "off";
+    std::string fgReason;
+    // mpv renders through D3D11 on the NVIDIA GPU with d3d11va frames.
+    bool nvidiaPipeline = false;
+    std::atomic_bool rtxSourceIsSdr = false;
+    int decoderPriorityValue = 1;
     std::atomic_bool shuttingDown = false;
     std::atomic_bool hwdecLogged = false;  // one-shot log for hwdec-current
 
@@ -1753,7 +1878,18 @@ private:
     ) {
         MpvApi &api = mpvApi();
         bool rtxVideoEnabled = nvidiaRtxSuperResolutionEnabled || nvidiaRtxHdrEnabled;
-        bool fastProfile = !rtxVideoEnabled && unifiedMemoryGpu();
+        decoderPriorityValue = decoderPriority;
+        {
+            std::lock_guard<std::mutex> lock(fgMutex);
+            fgAvailable = frameGenerationAvailable();
+            fgMultiplier = fgAvailable ? clampFrameGenerationMultiplier(gFrameGenerationPreference.load()) : 0;
+            fgActive = 0;
+            fgStatus = fgMultiplier > 0 ? "starting" : "off";
+            fgReason.clear();
+        }
+        bool frameGenerationEnabled = fgMultiplier > 0;
+        nvidiaPipeline = rtxVideoEnabled || frameGenerationEnabled;
+        bool fastProfile = !nvidiaPipeline && unifiedMemoryGpu();
         {
             std::lock_guard<std::mutex> lock(mpvMutex);
             // libmpv requires LC_NUMERIC=C: non-"C" locales that use comma
@@ -1775,7 +1911,7 @@ private:
             setMpvOptionStringLocked("keep-open", "yes");
             setMpvOptionStringLocked("volume-max", "200");
             setMpvOptionStringLocked("vo", "gpu-next,gpu,");
-            if (rtxVideoEnabled) {
+            if (nvidiaPipeline) {
                 setMpvOptionStringLocked("gpu-api", "d3d11");
                 setMpvOptionStringLocked("hwdec", "d3d11va");
                 setMpvOptionStringLocked("d3d11-adapter", "NVIDIA");
@@ -1787,9 +1923,17 @@ private:
 
             rtxSuperResolution = nvidiaRtxSuperResolutionEnabled;
             rtxHdr = nvidiaRtxHdrEnabled;
-            appliedVideoFilter = rtxVideoFilter(false);
-            if (!appliedVideoFilter.empty()) {
-                setMpvOptionStringLocked("vf", appliedVideoFilter.c_str());
+            appliedVideoFilter = composedVideoFilter(rtxVideoFilter(false));
+            if (!appliedVideoFilter.empty() &&
+                api.setOptionString(mpv, "vf", appliedVideoFilter.c_str()) < 0 &&
+                frameGenerationEnabled) {
+                // A libmpv without vf_dlssfg (NUVIO_LIBMPV_PATH, an old build)
+                // rejects the whole chain: keep the RTX filters, drop FG.
+                disableFrameGenerationForLibmpv();
+                appliedVideoFilter = rtxVideoFilter(false);
+                if (!appliedVideoFilter.empty()) {
+                    setMpvOptionStringLocked("vf", appliedVideoFilter.c_str());
+                }
             }
             setMpvOptionStringLocked("target-colorspace-hint", "yes");
             if (decoderPriority == 0) {
@@ -1846,6 +1990,11 @@ private:
             int initResult = api.initialize(mpv);
             if (initResult < 0) {
                 throw std::runtime_error(std::string("mpv_initialize failed: ") + api.errorText(initResult));
+            }
+            // vf_dlssfg reports at info level that it started, and at warn
+            // level why it turned itself off; both drive the controls' FG button.
+            if (fgAvailable) {
+                api.requestLogMessages(mpv, "info");
             }
 
             std::vector<const char *> loadCommand = {"loadfile", sourceUrl.c_str()};
@@ -1965,6 +2114,11 @@ private:
             controlsWebReady.store(true);
             flushPendingControlsJsonIfReady();
             syncControls();
+            pushFrameGenerationState();
+            return;
+        }
+        if (type == "setFrameGeneration") {
+            setFrameGeneration((int)std::llround(value));
             return;
         }
         if (type == "selectSubtitleTrack") {
@@ -2085,17 +2239,149 @@ private:
         return "";
     }
 
+    // Frame generation goes first: vf_dlssfg needs the decoder's d3d11va
+    // NV12/P010 frames, and d3d11vpp's RTX output is RGB.
+    std::string composedVideoFilter(const std::string &rtxFilter) {
+        int multiplier = 0;
+        {
+            std::lock_guard<std::mutex> lock(fgMutex);
+            multiplier = fgStatus == "failed" ? 0 : fgMultiplier;
+        }
+        if (multiplier <= 0) return rtxFilter;
+        // %<bytes>% quotes the paths, which hold ':' and '\'.
+        std::string bridge = toUtf8(frameGenerationBridgePath());
+        std::string runtimeDir = toUtf8(frameGenerationRuntimeDirectory());
+        std::string frameGeneration = "@nuviofg:dlssfg=multiplier=" + std::to_string(multiplier) +
+            ":bridge=%" + std::to_string(bridge.size()) + "%" + bridge +
+            ":runtime-dir=%" + std::to_string(runtimeDir.size()) + "%" + runtimeDir;
+        return rtxFilter.empty() ? frameGeneration : frameGeneration + "," + rtxFilter;
+    }
+
+    void applyVideoFilter() {
+        std::string rtxFilter = rtxVideoFilter(rtxSourceIsSdr.load());
+        std::string wanted = composedVideoFilter(rtxFilter);
+        bool rejected = false;
+        {
+            std::lock_guard<std::mutex> lock(mpvMutex);
+            if (!mpv || wanted == appliedVideoFilter) return;
+            rejected = mpvApi().setPropertyString(mpv, "vf", wanted.c_str()) < 0 && wanted != rtxFilter;
+            if (rejected) {
+                // See startMpv: this libmpv has no vf_dlssfg.
+                mpvApi().setPropertyString(mpv, "vf", rtxFilter.c_str());
+                wanted = rtxFilter;
+            }
+            appliedVideoFilter = wanted;
+        }
+        if (rejected) {
+            disableFrameGenerationForLibmpv();
+            pushFrameGenerationState();
+        }
+    }
+
+    // The loaded libmpv lacks vf_dlssfg: hide the button for this player.
+    void disableFrameGenerationForLibmpv() {
+        std::lock_guard<std::mutex> lock(fgMutex);
+        fgAvailable = false;
+        fgMultiplier = 0;
+        fgActive = 0;
+        fgStatus = "off";
+        fgReason = "this libmpv has no dlssfg filter";
+    }
+
     void updateRtxVideoFilter() {
         if (!rtxHdr) return;
         std::string gamma = stringProperty("video-params/gamma", "");
         if (gamma.empty()) return;
-        const bool sourceIsSdr = gamma != "pq" && gamma != "hlg";
-        std::string wanted = rtxVideoFilter(sourceIsSdr);
-        if (wanted == appliedVideoFilter) return;
+        rtxSourceIsSdr.store(gamma != "pq" && gamma != "hlg");
+        applyVideoFilter();
+    }
+
+    // Moves rendering to D3D11 on the NVIDIA GPU with d3d11va decoding, which
+    // vf_dlssfg needs. Changing gpu-api or d3d11-adapter makes mpv recreate
+    // the VO, so each is only touched when it differs.
+    void ensureNvidiaPipeline() {
+        if (nvidiaPipeline) return;
+        nvidiaPipeline = true;
+        std::string context = stringProperty("current-gpu-context", "");
         std::lock_guard<std::mutex> lock(mpvMutex);
         if (!mpv) return;
-        mpvApi().setPropertyString(mpv, "vf", wanted.c_str());
-        appliedVideoFilter = wanted;
+        MpvApi &api = mpvApi();
+        if (decoderPriorityValue != 2) {
+            api.setPropertyString(mpv, "hwdec", "d3d11va");
+        }
+        if (!dxgiAdapterInfo().primaryIsNvidia) {
+            api.setPropertyString(mpv, "d3d11-adapter", "NVIDIA");
+        }
+        if (context.find("d3d11") == std::string::npos) {
+            api.setPropertyString(mpv, "gpu-api", "d3d11");
+        }
+    }
+
+    void setFrameGeneration(int requested) {
+        int multiplier = clampFrameGenerationMultiplier(requested);
+        {
+            std::lock_guard<std::mutex> lock(fgMutex);
+            if (!fgAvailable) multiplier = 0;
+            fgMultiplier = multiplier;
+            fgActive = 0;
+            fgStatus = multiplier > 0 ? "starting" : "off";
+            fgReason.clear();
+        }
+        gFrameGenerationPreference.store(multiplier);
+        if (multiplier > 0) ensureNvidiaPipeline();
+        applyVideoFilter();
+        pushFrameGenerationState();
+        sendPlayerEvent("frameGenerationChanged", multiplier);
+    }
+
+    void pushFrameGenerationState() {
+        std::ostringstream script;
+        {
+            std::lock_guard<std::mutex> lock(fgMutex);
+            script << "window.playerFrameGeneration&&window.playerFrameGeneration({available:"
+                   << (fgAvailable ? "true" : "false")
+                   << ",multiplier:" << fgMultiplier
+                   << ",active:" << fgActive
+                   << ",maxMultiplier:" << kMaxFrameGenerationMultiplier
+                   << ",status:\"" << fgStatus << "\""
+                   << ",reason:\"" << jsonEscape(fgReason) << "\"})";
+        }
+        executeScript(script.str());
+    }
+
+    void handleMpvLogMessage(const mpv_event_log_message &message) {
+        if (!message.text) return;
+        std::string text(message.text);
+        while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+
+        static const std::string offTag = "frame generation off: ";
+        static const std::string onTag = "DLSS frame generation ";
+        size_t off = text.find(offTag);
+        if (off != std::string::npos) {
+            {
+                std::lock_guard<std::mutex> lock(fgMutex);
+                if (fgMultiplier == 0) return;
+                fgStatus = "failed";
+                fgActive = 0;
+                fgReason = text.substr(off + offTag.size());
+            }
+            // Drop the pass-through filter so the chain is back to normal.
+            applyVideoFilter();
+            pushFrameGenerationState();
+            return;
+        }
+        size_t on = text.find(onTag);
+        if (on != std::string::npos) {
+            int active = std::atoi(text.c_str() + on + onTag.size());
+            if (active < 2) return;
+            {
+                std::lock_guard<std::mutex> lock(fgMutex);
+                if (fgMultiplier == 0) return;
+                fgActive = active;
+                fgStatus = "on";
+            }
+            pushFrameGenerationState();
+        }
     }
 
     void drainMpvEvents() {
@@ -2116,6 +2402,9 @@ private:
             }
             if (event->event_id == MPV_EVENT_VIDEO_RECONFIG) {
                 updateRtxVideoFilter();
+            }
+            if (event->event_id == MPV_EVENT_LOG_MESSAGE && event->data) {
+                handleMpvLogMessage(*static_cast<mpv_event_log_message *>(event->data));
             }
         }
     }
@@ -2594,6 +2883,17 @@ Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_create(
     auto *holder = new std::shared_ptr<WindowsMpvWebPlayer>(player);
     jlong handle = (jlong)(intptr_t)holder;
     return handle;
+}
+
+// Frame generation multiplier (0 = off, 2..4) that players created from now on start with.
+extern "C" JNIEXPORT void JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_setFrameGenerationPreference(JNIEnv *, jobject, jint multiplier) {
+    gFrameGenerationPreference.store(clampFrameGenerationMultiplier((int)multiplier));
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_frameGenerationAvailable(JNIEnv *, jobject) {
+    return frameGenerationAvailable() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

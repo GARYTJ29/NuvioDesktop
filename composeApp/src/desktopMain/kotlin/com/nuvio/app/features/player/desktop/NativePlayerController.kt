@@ -62,6 +62,11 @@ internal class NativePlayerController(
     private val host: NativePlayerHost,
     private val nativeCreate: NativePlayerCreate = { hostViewPtr, source, headers, playWhenReady, positionMs, controlsUrl, decoder, rtx, rtxHdr, sink ->
         NativePlayerBridge.ensureLoaded()
+        if (DesktopHostOs.current == DesktopHostOs.WINDOWS) {
+            runCatching {
+                NativePlayerBridge.setFrameGenerationPreference(DesktopPlayerFrameGenerationStorage.loadMultiplier())
+            }
+        }
         NativePlayerBridge.create(hostViewPtr, source, headers, playWhenReady, positionMs, controlsUrl, decoder, rtx, rtxHdr, sink)
     },
     private val nativeDispose: (Long) -> Unit = NativePlayerBridge::dispose,
@@ -620,6 +625,8 @@ internal class NativePlayerController(
             "dragWindow" -> NativePlayerBridge.beginWindowDrag(handle)
             "volumeChange" -> setFallbackVolume(value.toFloat())
             "volumeChangeTemporary" -> setTemporaryVolume(value.toFloat())
+            // The Windows bridge applied it already; remember it for the next video.
+            "frameGenerationChanged" -> DesktopPlayerFrameGenerationStorage.saveMultiplier(value.toInt())
             "setPlaybackSpeed" -> {
                 if (onEvent(type, value)) return
                 setPlaybackSpeed(value.toFloat())

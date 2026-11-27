@@ -146,6 +146,12 @@ internal object NativePlayerBridge {
     external fun shutdownWebView2Warmup()
     external fun setWindowsDisplaySleepInhibited(inhibited: Boolean): Boolean
 
+    /** Windows only: DLSS frame generation multiplier (0 = off, 2..4) the next player starts with. */
+    external fun setFrameGenerationPreference(multiplier: Int)
+
+    /** Windows only: true when the frame generation files ship with the app and an NVIDIA GPU is present. */
+    external fun frameGenerationAvailable(): Boolean
+
     val controlsPageUrl: String by lazy {
         ensureLoaded()
         controlsPageAssets.url

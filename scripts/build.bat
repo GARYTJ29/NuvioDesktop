@@ -102,7 +102,7 @@ REM launcher and its .cfg are excluded from the mirror - excluded files are
 REM also never purged - and copied under their new names afterwards.
 set "DIST=%ROOT%\dist\NuvioDesktop"
 echo [build] Staging %DIST% ...
-robocopy "%APP_SRC%" "%DIST%" /MIR /XF Nuvio.exe Nuvio.cfg NuvioDesktop.exe NuvioDesktop.cfg /NFL /NDL /NJH /NJS /NP >nul
+robocopy "%APP_SRC%" "%DIST%" /MIR /XF Nuvio.exe Nuvio.cfg NuvioDesktop.exe NuvioDesktop.cfg nvngx_dlssg.dll nvngx_dlssg.LICENSE.txt /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 (
     echo [build] robocopy failed.
     goto :fail
@@ -114,6 +114,21 @@ copy /y "%APP_SRC%\app\Nuvio.cfg" "%DIST%\app\NuvioDesktop.cfg" >nul || goto :fa
 REM Older builds staged a plain copy; drop any leftover original names.
 if exist "%DIST%\Nuvio.exe" del /f /q "%DIST%\Nuvio.exe"
 if exist "%DIST%\app\Nuvio.cfg" del /q "%DIST%\app\Nuvio.cfg"
+
+REM --- DLSS frame generation runtime ----------------------------------------------
+REM NVIDIA's nvngx_dlssg.dll is not bundled in the app jar. The player looks for
+REM it next to NuvioDesktop.exe and hides the frame generation button without it.
+REM scripts\fetch-dlss-sdk.sh downloads it into vendor\dlss-sdk. The robocopy
+REM above excludes it, so /MIR doesn't purge it; copy /y refreshes it here.
+set "DLSSG_DLL=%ROOT%\vendor\dlss-sdk\lib\Windows_x86_64\rel\nvngx_dlssg.dll"
+if exist "%DLSSG_DLL%" (
+    copy /y "%DLSSG_DLL%" "%DIST%\nvngx_dlssg.dll" >nul || goto :fail
+    if exist "%ROOT%\vendor\dlss-sdk\LICENSE.txt" copy /y "%ROOT%\vendor\dlss-sdk\LICENSE.txt" "%DIST%\nvngx_dlssg.LICENSE.txt" >nul
+    echo [build] Copied nvngx_dlssg.dll ^(DLSS frame generation^)
+) else (
+    echo [build] nvngx_dlssg.dll not found: frame generation stays hidden.
+    echo [build]          Run "bash scripts/fetch-dlss-sdk.sh" to download it.
+)
 
 REM --- Optional MSI -------------------------------------------------------------
 if "%DO_MSI%"=="1" (

@@ -34,6 +34,9 @@ AGENTS.md
 PERFORMANCE_FINDINGS.md
 scripts/*
 !scripts/sign-ios-device-app.py
+!scripts/fetch-dlss-sdk.sh
+# NVIDIA DLSS runtime, downloaded by scripts/fetch-dlss-sdk.sh
+vendor/dlss-sdk/
 iosApp/Configuration/DeviceSigning.local.json
 
 # Local MPVKit iOS build environment (sparse APFS image, see MPVKit docs)

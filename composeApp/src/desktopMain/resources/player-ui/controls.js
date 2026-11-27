@@ -591,6 +591,65 @@ const showPlayerToast = (message, { durationMs = playerToastDurationMs, icon = n
   }
 };
 
+// DLSS frame generation (Windows, NVIDIA). The native bridge owns the state:
+// it applies the filter and reports, through window.playerFrameGeneration,
+// whether DLSS-G actually started (and at which multiplier) or why it could not.
+// The button only asks for the next multiplier: Off -> 2x -> 3x -> 4x -> Off.
+const frameGenButton = document.getElementById("frameGenButton");
+const frameGenBadge = document.getElementById("frameGenBadge");
+let frameGen = { available: false, multiplier: 0, active: 0, maxMultiplier: 4, status: "off", reason: "" };
+
+const frameGenShownMultiplier = () => (frameGen.status === "failed" ? 0 : frameGen.active || frameGen.multiplier);
+
+const renderFrameGeneration = () => {
+  if (!frameGenButton) return;
+  setVisible(frameGenButton, Boolean(frameGen.available));
+  const shown = frameGenShownMultiplier();
+  frameGenButton.setAttribute("aria-pressed", String(shown > 0));
+  frameGenButton.classList.toggle("is-starting", frameGen.status === "starting");
+  frameGenButton.classList.toggle("is-failed", frameGen.status === "failed");
+  let label = "Frame generation: off";
+  if (frameGen.status === "failed") label = `Frame generation unavailable: ${frameGen.reason || "unknown reason"}`;
+  else if (frameGen.status === "starting") label = `Frame generation: starting ${frameGen.multiplier}x`;
+  else if (shown > 0) label = `Frame generation: ${shown}x`;
+  setAttr(frameGenButton, "aria-label", label);
+  setAttr(frameGenButton, "title", label);
+  if (frameGenBadge) setTextContent(frameGenBadge, shown > 0 ? `${shown}x` : "");
+};
+
+const nextFrameGenMultiplier = () => {
+  const max = Number(frameGen.maxMultiplier) || 4;
+  if (frameGen.status === "failed" || frameGen.multiplier <= 0) return 2;
+  // The GPU tops out below what was asked (RTX 40 runs 2x): the next press turns FG off.
+  if (frameGen.status === "on" && frameGen.active > 0 && frameGen.active < frameGen.multiplier) return 0;
+  return frameGen.multiplier >= max ? 0 : frameGen.multiplier + 1;
+};
+
+window.playerFrameGeneration = next => {
+  const previous = frameGen;
+  frameGen = { ...frameGen, ...(next || {}) };
+  renderFrameGeneration();
+  if (!frameGen.available) return;
+  if (frameGen.status === "on" && (previous.status !== "on" || previous.active !== frameGen.active)) {
+    showPlayerToast(`Frame generation ${frameGen.active}x`, { icon: "#icon-frame-gen" });
+  } else if (frameGen.status === "failed" && previous.status !== "failed") {
+    showPlayerToast(`Frame generation unavailable: ${frameGen.reason || "unknown reason"}`, {
+      icon: "#icon-frame-gen",
+      durationMs: 4000,
+    });
+  } else if (frameGen.status === "off" && previous.status !== "off") {
+    showPlayerToast("Frame generation off", { icon: "#icon-frame-gen" });
+  }
+};
+
+if (frameGenButton) {
+  frameGenButton.addEventListener("click", event => {
+    event.stopPropagation();
+    noteChromeActivity(true);
+    send("setFrameGeneration", nextFrameGenMultiplier());
+  });
+}
+
 const settingToastLabel = command => {
   if (command === "resize") return state.resizeModeLabel || "Fit";
   if (command === "speed") return state.playbackSpeedLabel || "1x";

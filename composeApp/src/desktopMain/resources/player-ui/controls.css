@@ -970,6 +970,55 @@ button:disabled {
   width: 76px;
 }
 
+/* DLSS frame generation toggle: accent ring + multiplier badge while on. */
+.frame-gen-button {
+  position: relative;
+}
+
+.frame-gen-button[aria-pressed="true"] {
+  color: #fff;
+  background: var(--theme-accent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, .18), 0 0 14px rgba(60, 123, 255, .45);
+}
+
+.frame-gen-button[aria-pressed="true"]:hover {
+  background: var(--theme-accent-strong);
+}
+
+.frame-gen-button.is-starting svg {
+  animation: frame-gen-pulse 1.1s ease-in-out infinite;
+}
+
+.frame-gen-button.is-failed {
+  color: rgba(255, 255, 255, .5);
+}
+
+.frame-gen-badge {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  min-width: 18px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #fff;
+  color: #10131a;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.frame-gen-badge:empty {
+  display: none;
+}
+
+@keyframes frame-gen-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .45; }
+}
+
 /* PiP lock button: hidden outside pip-mode, visible inside it. */
 .pip-lock-button {
   display: none !important;
